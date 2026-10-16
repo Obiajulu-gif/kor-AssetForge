@@ -2,6 +2,7 @@ package router
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
 	"time"
@@ -27,7 +28,12 @@ import (
 )
 
 // SetupRouter initializes the HTTP router and registers all routes.
+// It panics if mandatory environment configuration is invalid.
 func SetupRouter(db *gorm.DB) *gin.Engine {
+	runtimeConfig, err := config.LoadRuntimeConfig()
+	if err != nil {
+		panic(fmt.Errorf("invalid application configuration: %w", err))
+	}
 	// Initialize Stellar client
 	stellarClient, err := config.InitStellarClient()
 	if err != nil {
@@ -68,12 +74,12 @@ func SetupRouter(db *gorm.DB) *gin.Engine {
 
 	// Setup authentication
 	authConfig := &auth.AuthConfig{
-		JWTSecret:          getEnvOrDefault("JWT_SECRET", "your-super-secret-jwt-key-change-in-production"),
-		JWTExpirationHours: getEnvIntOrDefault("JWT_EXPIRATION_HOURS", 24),
-		RefreshTokenHours:  getEnvIntOrDefault("REFRESH_TOKEN_HOURS", 168),
-		EmailTokenHours:    getEnvIntOrDefault("EMAIL_TOKEN_HOURS", 24),
+		JWTSecret:            runtimeConfig.JWTSecret,
+		JWTExpirationHours:   getEnvIntOrDefault("JWT_EXPIRATION_HOURS", 24),
+		RefreshTokenHours:    getEnvIntOrDefault("REFRESH_TOKEN_HOURS", 168),
+		EmailTokenHours:      getEnvIntOrDefault("EMAIL_TOKEN_HOURS", 24),
 		PasswordResetMinutes: getEnvIntOrDefault("PASSWORD_RESET_HOURS", 30),
-		BcryptCost:         getEnvIntOrDefault("BCRYPT_COST", 12),
+		BcryptCost:           getEnvIntOrDefault("BCRYPT_COST", 12),
 	}
 	emailService := services.NewEmailServiceFromEnv()
 	authHandler := auth.NewAuthHandler(db, authConfig, emailService)
@@ -177,7 +183,10 @@ func SetupRouter(db *gorm.DB) *gin.Engine {
 		v1.POST("/auth/2fa/login", authHandler.LoginWith2FA)
 
 		// Asset routes (with write-through cache invalidation)
-		assetHandler := handlers.NewAssetHandler(db, stellarClient, redisClient, emailService)
+		assetHandler, err := handlers.NewAssetHandler(db, stellarClient, redisClient, emailService, runtimeConfig.AssetTokenContractID)
+		if err != nil {
+			panic(err)
+		}
 		v1.POST("/assets/tokenize",
 			middleware.InvalidateOnWrite(cacheManager, "kor:asset:*"),
 			middleware.InvalidateOnWriteTags(cacheManager, "asset"),
@@ -408,7 +417,7 @@ func SetupRouter(db *gorm.DB) *gin.Engine {
 
 	// WebSocket routes
 	wsHandler := handlers.NewWebSocketHandler(
-		getEnvOrDefault("JWT_SECRET", "your-super-secret-jwt-key-change-in-production"),
+		runtimeConfig.JWTSecret,
 		config.LoadWSRateLimitConfig(),
 	)
 	router.GET("/ws", wsHandler.HandleWS)

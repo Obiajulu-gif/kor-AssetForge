@@ -1,0 +1,40 @@
+rules:
+  - id: assetforge.sql-query-construction
+    languages: [go]
+    severity: ERROR
+    message: Bind SQL values with placeholders; do not concatenate or format SQL passed to database/sql or GORM.
+    mode: taint
+    pattern-sources:
+      - pattern: $LEFT + $RIGHT
+      - pattern: fmt.Sprintf(...)
+      - pattern: fmt.Sprint(...)
+      - pattern: fmt.Sprintln(...)
+      - patterns:
+          - pattern-either:
+              - pattern: $CTX.Query(...)
+              - pattern: $CTX.DefaultQuery(...)
+              - pattern: $CTX.Param(...)
+              - pattern: $CTX.PostForm(...)
+          - metavariable-type:
+              metavariable: $CTX
+              type: '*gin.Context'
+        exact: true
+      - patterns:
+          - pattern: $REQ.FormValue(...)
+          - metavariable-type:
+              metavariable: $REQ
+              type: '*http.Request'
+        exact: true
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: $DB.Raw($SQL, ...)
+              - pattern: $DB.Exec($SQL, ...)
+              - pattern: $DB.Query($SQL, ...)
+              - pattern: $DB.QueryRow($SQL, ...)
+              - pattern: $DB.Prepare($SQL, ...)
+              - pattern: $DB.ExecContext($CTX, $SQL, ...)
+              - pattern: $DB.QueryContext($CTX, $SQL, ...)
+              - pattern: $DB.QueryRowContext($CTX, $SQL, ...)
+              - pattern: $DB.PrepareContext($CTX, $SQL, ...)
+          - focus-metavariable: $SQL

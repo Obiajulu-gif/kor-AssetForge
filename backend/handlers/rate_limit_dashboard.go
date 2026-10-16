@@ -97,14 +97,15 @@ func (h *RateLimitDashboardHandler) GetHistoricalStats(c *gin.Context) {
 	}
 
 	var rows []HourlyStat
-	query := h.DB.Raw(`
+	if err := h.DB.WithContext(c.Request.Context()).Raw(`
 		SELECT DATE_TRUNC('hour', hit_at) AS hour, endpoint, COUNT(*) AS total_hits
 		FROM rate_limit_events
-		WHERE hit_at >= ?`, since)
-	if endpoint != "" {
-		query = query.Where("endpoint = ?", endpoint)
+		WHERE hit_at >= ? AND (? = '' OR endpoint = ?)
+		GROUP BY 1, 2
+		ORDER BY 1 ASC`, since, endpoint, endpoint).Scan(&rows).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch rate limit history"})
+		return
 	}
-	query.Group("1, 2").Order("1 ASC").Scan(&rows)
 
 	c.JSON(http.StatusOK, gin.H{
 		"success":  true,

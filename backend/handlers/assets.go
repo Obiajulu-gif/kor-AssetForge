@@ -23,29 +23,38 @@ import (
 	"gorm.io/gorm"
 )
 
-type AssetHandler struct {
-	db                *gorm.DB
-	stellarClient     *utils.StellarClient
-	redisClient       *redis.Client
-	emailService      services.EmailService
-	workflow          *services.WorkflowService
-	metadataService   *services.MetadataService
-	transferValidator *services.TransferValidator
+type contractInvoker interface {
+	InvokeContract(contractID, method string, params []interface{}) (string, error)
 }
 
-func NewAssetHandler(db *gorm.DB, stellarClient *utils.StellarClient, redisClient *redis.Client, emailService services.EmailService, workflow ...*services.WorkflowService) *AssetHandler {
+type AssetHandler struct {
+	db                   *gorm.DB
+	stellarClient        contractInvoker
+	assetTokenContractID string
+	redisClient          *redis.Client
+	emailService         services.EmailService
+	workflow             *services.WorkflowService
+	metadataService      *services.MetadataService
+	transferValidator    *services.TransferValidator
+}
+
+func NewAssetHandler(db *gorm.DB, stellarClient contractInvoker, redisClient *redis.Client, emailService services.EmailService, contractID string, workflow ...*services.WorkflowService) (*AssetHandler, error) {
+	if err := config.ValidateAssetTokenContractID(contractID); err != nil {
+		return nil, err
+	}
 	handler := &AssetHandler{
-		db:                db,
-		stellarClient:     stellarClient,
-		redisClient:       redisClient,
-		emailService:      emailService,
-		metadataService:   services.NewMetadataService(db),
-		transferValidator: services.NewTransferValidator(db),
+		db:                   db,
+		stellarClient:        stellarClient,
+		assetTokenContractID: contractID,
+		redisClient:          redisClient,
+		emailService:         emailService,
+		metadataService:      services.NewMetadataService(db),
+		transferValidator:    services.NewTransferValidator(db),
 	}
 	if len(workflow) > 0 {
 		handler.workflow = workflow[0]
 	}
-	return handler
+	return handler, nil
 }
 
 // TokenizeAsset handles formal asset tokenization with Soroban integration
@@ -129,9 +138,7 @@ func (h *AssetHandler) TokenizeAsset(c *gin.Context) {
 	}
 
 	params := []interface{}{req.Name, req.Symbol, req.TotalSupply, req.IssuerAccount}
-	contractID := "CXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
-
-	txHash, err := h.stellarClient.InvokeContract(contractID, "mint", params)
+	txHash, err := h.stellarClient.InvokeContract(h.assetTokenContractID, "mint", params)
 	if err != nil {
 		c.JSON(http.StatusAccepted, gin.H{
 			"message": "Asset created in database but contract invocation failed",

@@ -52,9 +52,12 @@ func (h *AnalyticsHandler) GetSummary(c *gin.Context) {
 func (h *AnalyticsHandler) GetUserGrowth(c *gin.Context) {
 	days := 30
 	if d := c.Query("days"); d != "" {
-		if parsed, err := time.ParseDuration(d + "h"); err == nil {
-			days = int(parsed.Hours() / 24)
+		parsed, err := strconv.Atoi(d)
+		if err != nil || parsed < 1 || parsed > 365 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "days must be an integer between 1 and 365"})
+			return
 		}
+		days = parsed
 	}
 	since := time.Now().UTC().AddDate(0, 0, -days)
 
@@ -63,12 +66,15 @@ func (h *AnalyticsHandler) GetUserGrowth(c *gin.Context) {
 		Count int64  `json:"count"`
 	}
 	var rows []DailyCount
-	h.DB.Raw(`
+	if err := h.DB.WithContext(c.Request.Context()).Raw(`
 		SELECT DATE(created_at) AS date, COUNT(*) AS count
 		FROM users
 		WHERE created_at >= ? AND deleted_at IS NULL
 		GROUP BY DATE(created_at)
-		ORDER BY date ASC`, since).Scan(&rows)
+		ORDER BY date ASC`, since).Scan(&rows).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch user growth"})
+		return
+	}
 
 	c.JSON(http.StatusOK, gin.H{"success": true, "data": rows, "days": days})
 }
