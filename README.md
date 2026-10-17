@@ -83,6 +83,8 @@ kor-AssetForge/
 
 ## API Endpoints
 
+See [docs/API_VERSIONING_POLICY.md](docs/API_VERSIONING_POLICY.md) for the versioning and deprecation strategy (issue #304).
+
 - `GET /health` - Health check
 - `POST /api/v1/assets` - Create new asset token
 - `GET /api/v1/assets` - List all assets

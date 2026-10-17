@@ -1,26 +1,44 @@
 package middleware
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/redis/go-redis/v9"
 	"gorm.io/gorm"
 
 	"github.com/yourusername/kor-assetforge/models"
 )
 
+// sessionCacheTTL is how long a valid session lookup is cached in Redis
+// before falling back to Postgres again (issue #305).
+const sessionCacheTTL = 30 * time.Second
+
 // SessionValidator validates that the device session is still active and not revoked.
 // It reads the X-Session-Token header and looks up the DeviceSession.
 // Also updates LastActiveAt on valid sessions.
-func SessionValidator(db *gorm.DB) gin.HandlerFunc {
+//
+// redisClient is optional (may be nil) — a cache miss or a nil client both
+// just fall through to the existing Postgres lookup, which remains the
+// source of truth.
+func SessionValidator(db *gorm.DB, redisClient *redis.Client) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		token := c.GetHeader("X-Session-Token")
 		if token == "" {
 			c.Next()
 			return
+		}
+
+		cacheKey := "session:valid:" + token
+		if redisClient != nil {
+			if _, err := redisClient.Get(context.Background(), cacheKey).Result(); err == nil {
+				c.Next()
+				return
+			}
 		}
 
 		var session models.DeviceSession
@@ -32,6 +50,10 @@ func SessionValidator(db *gorm.DB) gin.HandlerFunc {
 				"code":    "session_invalid",
 			})
 			return
+		}
+
+		if redisClient != nil {
+			redisClient.Set(context.Background(), cacheKey, "1", sessionCacheTTL)
 		}
 
 		// Update last active timestamp (non-blocking — ignore error).

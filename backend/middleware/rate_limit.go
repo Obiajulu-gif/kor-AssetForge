@@ -143,7 +143,22 @@ func AdvancedRateLimit(cfg *RateLimitConfig) gin.HandlerFunc {
 			store = mutateStore
 		}
 
-		allowed, _ := store.allow(key)
+		allowed, tokens := store.allow(key)
+
+		// Standard rate limit headers (issue #303), on every response from
+		// this middleware so clients can implement backoff themselves.
+		remaining := int(tokens)
+		if remaining < 0 {
+			remaining = 0
+		}
+		resetIn := 1
+		if store.rps > 0 {
+			resetIn = int(float64(store.burst) / store.rps)
+		}
+		c.Header("X-RateLimit-Limit", strconv.Itoa(store.burst))
+		c.Header("X-RateLimit-Remaining", strconv.Itoa(remaining))
+		c.Header("X-RateLimit-Reset", strconv.FormatInt(time.Now().Add(time.Duration(resetIn)*time.Second).Unix(), 10))
+
 		if !allowed {
 			if cfg.logger != nil {
 				cfg.logger.Warnw("rate limit exceeded",
