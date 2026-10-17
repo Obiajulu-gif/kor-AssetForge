@@ -51,6 +51,6 @@ with a published sunset date.
 
 - Initial API changelog.
 - Pagination maximum (`MAX_PAGE_SIZE = 100`) enforced globally
-  ([#302](https://github.com/barry01-hash/kor-AssetForge/issues/302)).
+  ([#302](https://github.com/parkerwinner/kor-AssetForge/issues/302)).
 - Comprehensive v1 → v2 migration guide and enhanced migration endpoint
-  ([#301](https://github.com/barry01-hash/kor-AssetForge/issues/301)).
+  ([#301](https://github.com/parkerwinner/kor-AssetForge/issues/301)).

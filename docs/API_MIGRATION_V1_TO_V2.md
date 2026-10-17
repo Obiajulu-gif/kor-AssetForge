@@ -219,7 +219,7 @@ const total = v2.total_count;
 ## 8. Support
 
 - **Email:** `api-support@assetforge.example`
-- **Issues:** <https://github.com/barry01-hash/kor-AssetForge/issues>
+- **Issues:** <https://github.com/parkerwinner/kor-AssetForge/issues>
 - **Runtime metadata:** `GET /api/version/migration-guide`
 - **General API reference:** [API.md](API.md)
 - **API changelog:** [api/CHANGELOG.md](api/CHANGELOG.md)

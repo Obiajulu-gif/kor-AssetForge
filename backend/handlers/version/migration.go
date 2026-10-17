@@ -32,7 +32,7 @@ const (
 	SupportEmail = "api-support@assetforge.example"
 
 	// IssuesURL is where API issues and migration blockers should be reported.
-	IssuesURL = "https://github.com/barry01-hash/kor-AssetForge/issues"
+	IssuesURL = "https://github.com/parkerwinner/kor-AssetForge/issues"
 )
 
 // TimelinePhase describes a single milestone in the v1 deprecation schedule.

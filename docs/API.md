@@ -117,5 +117,5 @@ Most endpoints are rate limited. When a limit is exceeded the API responds with
 ## Support
 
 For API support, open an issue at
-<https://github.com/barry01-hash/kor-AssetForge/issues> or email
+<https://github.com/parkerwinner/kor-AssetForge/issues> or email
 `api-support@assetforge.example`.
