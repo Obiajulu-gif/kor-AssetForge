@@ -1,0 +1,4 @@
+# Keep production code AND tests in the SQL scan (override Semgrep's defaults).
+.git/
+**/node_modules/
+**/target/

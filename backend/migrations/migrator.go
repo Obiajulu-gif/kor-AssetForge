@@ -80,7 +80,7 @@ func (m *Migrator) Down(n int) error {
 
 	if n <= 0 {
 		// If n <= 0, we could interpret it as "down all" or just "down 1"
-		// golang-migrate's Down() drops everything. 
+		// golang-migrate's Down() drops everything.
 		// Steps(-1) rolls back one.
 		if err := mgr.Steps(-1); err != nil && !errors.Is(err, migrate.ErrNoChange) {
 			return fmt.Errorf("failed to rollback migration: %w", err)
@@ -144,6 +144,9 @@ func (m *Migrator) Seed() error {
 			return fmt.Errorf("failed to read seed file %s: %w", entry.Name(), err)
 		}
 
+		// Only execute SQL embedded at build time. Never accept a path or SQL
+		// from requests/environment, or interpolate values into these scripts.
+		// nosemgrep: assetforge.sql-query-construction -- SQL comes exclusively from the embedded seedFiles FS.
 		if _, err := m.db.Exec(string(content)); err != nil {
 			return fmt.Errorf("failed to execute seed %s: %w", entry.Name(), err)
 		}

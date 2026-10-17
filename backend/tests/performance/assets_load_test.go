@@ -80,7 +80,7 @@ func TestLoad_Assets_GetByID(t *testing.T) {
 func TestLoad_Assets_Tokenize(t *testing.T) {
 	db := openDB(t)
 	t.Cleanup(func() {
-		db.Exec("DELETE FROM assets WHERE name LIKE 'PerfTok%'")
+		db.Exec("DELETE FROM assets WHERE name LIKE ?", "PerfTok%")
 	})
 
 	_, token := seedUser(t, db, "tok_"+uniqueSuffix())
@@ -228,7 +228,7 @@ func BenchmarkTokenizeAsset(b *testing.B) {
 	db := openDB(b)
 	_, token := seedUser(b, db, "bench_tok_"+uniqueSuffix())
 	b.Cleanup(func() {
-		db.Exec("DELETE FROM assets WHERE name LIKE 'BenchTok%'")
+		db.Exec("DELETE FROM assets WHERE name LIKE ?", "BenchTok%")
 	})
 	url := baseURL() + "/api/v1/assets/tokenize"
 	b.ResetTimer()
