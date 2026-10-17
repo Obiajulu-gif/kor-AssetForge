@@ -20,23 +20,52 @@ jobs:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: password
         options: >-
-          --health-cmd "pg_isready -U postgres -d testdb" --health-interval 10s --health-timeout 5s --health-retries 5
+          --health-cmd "pg_isready -U postgres -d testdb" --health-interval 5s --health-timeout 5s --health-retries 10
     steps:
       - uses: actions/checkout@v4
+
       - name: Set up Go
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@v5
         with:
           go-version-file: backend/go.mod
       - name: Install deps
         run: |
           cd backend
           go mod download
+
+      # Issue #417: Test Environment Variables
       - name: Run backend tests
         env:
           SQL_TEST_DATABASE_URL: postgres://postgres:password@localhost:5432/testdb?sslmode=disable
         run: |
           cd backend
-          go test $(go list ./... | grep -v /tests/performance) -v
+          go test $(go list ./... | grep -v /tests/performance) -v -covermode=atomic -coverprofile=coverage.out
+
+      - name: Report backend coverage
+        run: |
+          cd backend
+          go tool cover -func=coverage.out | tail -n 1
+
+      - name: Upload backend coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-coverage
+          path: backend/coverage.out
+          if-no-files-found: ignore
+
+  test-contracts:
+    name: Build & Test Contracts
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Run contract tests
+        run: |
+          cd contracts
+          cargo test
 
   sql-safety:
     name: SQL Safety
@@ -60,14 +89,73 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: 'frontend/package-lock.json'
+
       - name: Install dependencies
         run: |
           cd frontend
           npm ci
+
+      - name: Run frontend unit tests
+        env:
+          NEXT_PUBLIC_API_URL: http://localhost:8080
+        run: |
+          cd frontend
+          npm test -- --ci
+
       - name: Run frontend build
+        env:
+          NEXT_PUBLIC_API_URL: http://localhost:8080
         run: |
           cd frontend
           npm run build
+
+  e2e-frontend:
+    name: Frontend E2E
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: 'frontend/package-lock.json'
+
+      - name: Install dependencies
+        run: |
+          cd frontend
+          npm ci
+
+      - name: Install Playwright browsers
+        run: |
+          cd frontend
+          npx playwright install --with-deps chromium
+
+      - name: Build frontend
+        env:
+          NEXT_PUBLIC_API_URL: http://localhost:8080
+        run: |
+          cd frontend
+          npm run build
+
+      - name: Run E2E tests
+        env:
+          PORT: 3000
+          NEXT_PUBLIC_API_URL: http://localhost:8080
+        run: |
+          cd frontend
+          npx playwright test
+
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: frontend/playwright-report
+          if-no-files-found: ignore
 
   mobile-lint:
     name: Mobile Lint
@@ -78,6 +166,8 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: 'mobile/package-lock.json'
       - name: Install mobile deps
         run: |
           cd mobile
@@ -92,8 +182,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: github/codeql-action/init@v2
+      - uses: github/codeql-action/init@v3
         with:
           languages: go, javascript, typescript
-      - uses: github/codeql-action/autobuild@v2
-      - uses: github/codeql-action/analyze@v2
+      - uses: github/codeql-action/autobuild@v3
+      - uses: github/codeql-action/analyze@v3

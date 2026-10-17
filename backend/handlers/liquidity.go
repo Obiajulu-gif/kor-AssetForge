@@ -132,7 +132,10 @@ func (h *LiquidityHandler) ListPools(c *gin.Context) {
 		q.Limit = 20
 	}
 
-	db := h.db.Model(&models.LiquidityPool{}).Where("active = true")
+	// Preload both sides of the pair so serializing the list doesn't trigger
+	// a separate asset lookup per pool (issue #306) — GetPool already does
+	// this, ListPools just hadn't caught up.
+	db := h.db.Model(&models.LiquidityPool{}).Preload("AssetA").Preload("AssetB").Where("active = true")
 	if q.AssetID != 0 {
 		db = db.Where("asset_a_id = ? OR asset_b_id = ?", q.AssetID, q.AssetID)
 	}

@@ -1,5 +1,8 @@
 # kor-AssetForge
 
+[![CI](https://github.com/parkerwinner/kor-AssetForge/actions/workflows/ci.yml/badge.svg)](https://github.com/parkerwinner/kor-AssetForge/actions/workflows/ci.yml)
+![Backend coverage](https://img.shields.io/badge/backend%20coverage-tracked-blue)
+
 A decentralized marketplace for tokenizing and trading real-world assets (RWAs) on the Stellar network using Soroban smart contracts.
 
 ## Overview
@@ -79,6 +82,8 @@ kor-AssetForge/
 ```
 
 ## API Endpoints
+
+See [docs/API_VERSIONING_POLICY.md](docs/API_VERSIONING_POLICY.md) for the versioning and deprecation strategy (issue #304).
 
 - `GET /health` - Health check
 - `POST /api/v1/assets` - Create new asset token

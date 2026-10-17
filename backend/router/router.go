@@ -86,6 +86,8 @@ func SetupRouter(db *gorm.DB) *gin.Engine {
 	fileUploadHandler := handlers.NewFileUploadHandler()
 	authMiddleware := auth.NewAuthMiddleware(authConfig.JWTSecret)
 	authRateLimiter := auth.NewAuthRateLimiter(rate.Limit(5.0/60.0), 10)
+	registrationConfig := config.LoadRegistrationRateLimitConfig()
+	registrationRateLimiter := auth.NewRegistrationRateLimiter(registrationConfig.MaxPerWindow, registrationConfig.Window)
 
 	// Setup router
 	router := gin.New()
@@ -99,6 +101,7 @@ func SetupRouter(db *gorm.DB) *gin.Engine {
 		handlers.RequestLogger(),
 		handlers.GlobalErrorHandler(),
 		middleware.RequestSizeLimiter(2<<20),
+		middleware.SecurityHeaders(config.LoadSecurityHeadersConfig()),
 		middleware.RequireJSON(),
 		middleware.RateLimit(20, time.Minute),
 		middleware.CSRFProtection(os.Getenv("CSRF_SECRET")),
@@ -128,7 +131,7 @@ func SetupRouter(db *gorm.DB) *gin.Engine {
 		authGroup := v1.Group("/auth")
 		authGroup.Use(authRateLimiter.GeneralAuthRateLimit())
 		{
-			authGroup.POST("/register", authRateLimiter.RegisterRateLimit(), authHandler.Register)
+			authGroup.POST("/register", registrationRateLimiter.RegisterRateLimit(), middleware.CaptchaAfter(registrationConfig.CaptchaAfter, registrationConfig.Window), authHandler.Register)
 			authGroup.POST("/login", authRateLimiter.LoginRateLimit(), authHandler.Login)
 			authGroup.POST("/refresh", authHandler.RefreshToken)
 			authGroup.POST("/verify-email", authRateLimiter.EmailVerificationRateLimit(), authHandler.VerifyEmail)

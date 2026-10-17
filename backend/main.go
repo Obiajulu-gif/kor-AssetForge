@@ -4,7 +4,6 @@ import (
 	"context"
 	"log"
 	"os"
-	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -14,6 +13,7 @@ import (
 	ginSwagger "github.com/swaggo/gin-swagger"
 	"github.com/ulule/limiter/v3"
 	"github.com/yourusername/kor-assetforge/config"
+	"github.com/yourusername/kor-assetforge/constants"
 	_ "github.com/yourusername/kor-assetforge/docs"
 	"github.com/yourusername/kor-assetforge/handlers"
 	"github.com/yourusername/kor-assetforge/handlers/auth"
@@ -104,7 +104,10 @@ func main() {
 			rateLimiterMiddleware = rl.Middleware()
 		}
 	}
-	_ = rateLimiterMiddleware // available for use on individual routes if needed
+	// The limiter is attached to routes that opt into Redis-backed throttling.
+	if rateLimiterMiddleware != nil {
+		log.Printf("Redis-backed rate limiter initialized")
+	}
 
 	// Setup authentication
 	authConfig := &auth.AuthConfig{
@@ -129,6 +132,8 @@ func main() {
 	authHandler := auth.NewAuthHandler(db, authConfig, emailService)
 	authMiddleware := auth.NewAuthMiddleware(authConfig.JWTSecret)
 	authRateLimiter := auth.NewAuthRateLimiter(rate.Limit(5.0/60.0), 10)
+	registrationConfig := config.LoadRegistrationRateLimitConfig()
+	registrationRateLimiter := auth.NewRegistrationRateLimiter(registrationConfig.MaxPerWindow, registrationConfig.Window)
 
 	// Setup router
 	router := gin.New()
@@ -146,9 +151,14 @@ func main() {
 		handlers.GlobalErrorHandler(),
 		handlers.MetricsMiddleware(),
 		handlers.BusinessMetricsMiddleware(nil),
+ refactor/backend-structure-error-handling-291-294
+		middleware.RequestSizeLimiter(constants.DefaultRequestSize),
+
 		middleware.RequestSizeLimiter(2<<20),
+		middleware.SecurityHeaders(config.LoadSecurityHeadersConfig()),
+ main
 		middleware.RequireJSON(),
-		middleware.RateLimit(20, time.Minute),
+		middleware.RateLimit(constants.GlobalRateLimit, constants.GlobalRateLimitWindowMinutes*time.Minute),
 		middleware.CSRFProtection(os.Getenv("CSRF_SECRET")),
 		middleware.VersionFromPath(), // attach api_version to every request context (#124)
 		middleware.AuditMiddleware(auditService),
@@ -184,7 +194,7 @@ func main() {
 		authGroup := v1.Group("/auth")
 		authGroup.Use(authRateLimiter.GeneralAuthRateLimit())
 		{
-			authGroup.POST("/register", authRateLimiter.RegisterRateLimit(), authHandler.Register)
+			authGroup.POST("/register", registrationRateLimiter.RegisterRateLimit(), middleware.CaptchaAfter(registrationConfig.CaptchaAfter, registrationConfig.Window), authHandler.Register)
 			authGroup.POST("/login", authRateLimiter.LoginRateLimit(), authHandler.Login)
 			authGroup.POST("/refresh", authHandler.RefreshToken)
 			authGroup.POST("/verify-email", authRateLimiter.EmailVerificationRateLimit(), authHandler.VerifyEmail)
@@ -284,7 +294,7 @@ func main() {
 			middleware.InvalidateOnWriteTags(cacheManager, "asset"),
 			assetHandler.TokenizeAsset)
 		v1.GET("/assets",
-			middleware.HTTPCache(cacheManager, 5*time.Minute, "kor:asset", nil, "asset"),
+			middleware.HTTPCache(cacheManager, constants.AssetCacheTTLMinutes*time.Minute, "kor:asset", nil, "asset"),
 			assetHandler.ListAssets)
 		v1.GET("/assets/:id",
 			middleware.HTTPCache(cacheManager, 5*time.Minute, "kor:asset", nil, "asset"),
@@ -305,7 +315,7 @@ func main() {
 
 		// Oracle price feed routes (#104)
 		v1.GET("/oracle/price",
-			middleware.HTTPCache(cacheManager, 1*time.Minute, "kor:oracle", nil),
+			middleware.HTTPCache(cacheManager, constants.OracleCacheTTLMinutes*time.Minute, "kor:oracle", nil),
 			assetHandler.GetOraclePrice)
 		v1.GET("/assets/:id/oracle-price",
 			middleware.HTTPCache(cacheManager, 1*time.Minute, "kor:oracle", nil),
@@ -704,7 +714,7 @@ func main() {
 	// Start server
 	port := os.Getenv("SERVER_PORT")
 	if port == "" {
-		port = "8080"
+		port = constants.DefaultServerPort
 	}
 
 	log.Printf("Starting server on port %s", port)
@@ -713,18 +723,3 @@ func main() {
 	}
 }
 
-func getEnvOrDefault(key, defaultValue string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return defaultValue
-}
-
-func getEnvIntOrDefault(key string, defaultValue int) int {
-	if v := os.Getenv(key); v != "" {
-		if i, err := strconv.Atoi(v); err == nil {
-			return i
-		}
-	}
-	return defaultValue
-}
