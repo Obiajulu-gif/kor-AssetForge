@@ -57,7 +57,7 @@ func TestValidateFileRejectsEmptyFile(t *testing.T) {
 }
 
 func TestValidateFileRejectsOversizedFile(t *testing.T) {
-	big := bytes.Repeat([]byte{0xFF, 0xD8, 0xFF}, 4*1024*1024)
+	big := make([]byte, maxSize+1)
 	f := tempFile(t, "big.jpg", big)
 	defer f.Close()
 

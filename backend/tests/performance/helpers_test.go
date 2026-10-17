@@ -18,7 +18,7 @@
 //
 //	PERF_BASE_URL   – base URL of the server under test (default: http://localhost:8080)
 //	DATABASE_URL    – Postgres DSN used to seed test data
-//	JWT_SECRET      – must match the server's JWT_SECRET (default: your-super-secret-jwt-key-change-in-production)
+//	JWT_SECRET      – required; must match the server's JWT_SECRET (at least 32 characters)
 package performance
 
 import (
@@ -42,6 +42,7 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 
+	"github.com/yourusername/kor-assetforge/config"
 	"github.com/yourusername/kor-assetforge/models"
 )
 
@@ -57,10 +58,11 @@ func baseURL() string {
 }
 
 func jwtSecret() string {
-	if s := os.Getenv("JWT_SECRET"); s != "" {
-		return s
+	secret := os.Getenv("JWT_SECRET")
+	if err := config.ValidateJWTSecret(secret); err != nil {
+		panic(err)
 	}
-	return "your-super-secret-jwt-key-change-in-production"
+	return secret
 }
 
 // ---------------------------------------------------------------------------

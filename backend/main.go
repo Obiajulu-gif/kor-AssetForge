@@ -51,6 +51,10 @@ func main() {
 	if err := godotenv.Load(); err != nil {
 		log.Println("No .env file found, using system environment variables")
 	}
+	runtimeConfig, err := config.LoadRuntimeConfig()
+	if err != nil {
+		log.Fatalf("Invalid application configuration: %v", err)
+	}
 
 	// Initialize database
 	db, err := config.InitDB()
@@ -107,21 +111,12 @@ func main() {
 
 	// Setup authentication
 	authConfig := &auth.AuthConfig{
- refactor/backend-structure-error-handling-291-294
-		JWTSecret:          config.EnvOrDefault("JWT_SECRET", "your-super-secret-jwt-key-change-in-production"),
-		JWTExpirationHours: config.EnvIntOrDefault("JWT_EXPIRATION_HOURS", 24),
-		RefreshTokenHours:  config.EnvIntOrDefault("REFRESH_TOKEN_HOURS", 168),
-		EmailTokenHours:    config.EnvIntOrDefault("EMAIL_TOKEN_HOURS", 24),
+		JWTSecret:            runtimeConfig.JWTSecret,
+		JWTExpirationHours:   config.EnvIntOrDefault("JWT_EXPIRATION_HOURS", 24),
+		RefreshTokenHours:    config.EnvIntOrDefault("REFRESH_TOKEN_HOURS", 168),
+		EmailTokenHours:      config.EnvIntOrDefault("EMAIL_TOKEN_HOURS", 24),
 		PasswordResetMinutes: config.EnvIntOrDefault("PASSWORD_RESET_HOURS", 30),
-		BcryptCost:         config.EnvIntOrDefault("BCRYPT_COST", 12),
-
-		JWTSecret:            getEnvOrDefault("JWT_SECRET", "your-super-secret-jwt-key-change-in-production"),
-		JWTExpirationHours:   getEnvIntOrDefault("JWT_EXPIRATION_HOURS", 24),
-		RefreshTokenHours:    getEnvIntOrDefault("REFRESH_TOKEN_HOURS", 168),
-		EmailTokenHours:      getEnvIntOrDefault("EMAIL_TOKEN_HOURS", 24),
-		PasswordResetMinutes: getEnvIntOrDefault("PASSWORD_RESET_HOURS", 30),
-		BcryptCost:           getEnvIntOrDefault("BCRYPT_COST", 12),
- main
+		BcryptCost:           config.EnvIntOrDefault("BCRYPT_COST", 12),
 	}
 	emailService := services.NewEmailServiceFromEnv()
 	reportScheduler := services.NewReportSchedulerService(db, emailService)
@@ -156,12 +151,8 @@ func main() {
 		handlers.GlobalErrorHandler(),
 		handlers.MetricsMiddleware(),
 		handlers.BusinessMetricsMiddleware(nil),
- refactor/backend-structure-error-handling-291-294
 		middleware.RequestSizeLimiter(constants.DefaultRequestSize),
-
-		middleware.RequestSizeLimiter(2<<20),
 		middleware.SecurityHeaders(config.LoadSecurityHeadersConfig()),
- main
 		middleware.RequireJSON(),
 		middleware.RateLimit(constants.GlobalRateLimit, constants.GlobalRateLimitWindowMinutes*time.Minute),
 		middleware.CSRFProtection(os.Getenv("CSRF_SECRET")),
@@ -286,7 +277,10 @@ func main() {
 
 		// Asset routes (with write-through cache invalidation)
 		workflowService := services.NewWorkflowService(db, emailService)
-		assetHandler := handlers.NewAssetHandler(db, stellarClient, redisClient, emailService, workflowService)
+		assetHandler, err := handlers.NewAssetHandler(db, stellarClient, redisClient, emailService, runtimeConfig.AssetTokenContractID, workflowService)
+		if err != nil {
+			log.Fatalf("Invalid asset handler configuration: %v", err)
+		}
 		v1.POST("/assets/tokenize",
 			middleware.InvalidateOnWrite(cacheManager, "kor:asset:*"),
 			middleware.InvalidateOnWriteTags(cacheManager, "asset"),
@@ -698,7 +692,7 @@ func main() {
 	// WebSocket routes (#54) — outside v1 group so the CSRF/JSON middleware
 	// does not block the Upgrade handshake.
 	wsHandler := handlers.NewWebSocketHandler(
-		config.EnvOrDefault("JWT_SECRET", "your-super-secret-jwt-key-change-in-production"),
+		runtimeConfig.JWTSecret,
 		config.LoadWSRateLimitConfig(),
 	)
 	router.GET("/ws", wsHandler.HandleWS)

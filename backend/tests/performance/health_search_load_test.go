@@ -111,7 +111,7 @@ func TestLoad_Search_Suggestions(t *testing.T) {
 func TestLoad_KYC_Submit(t *testing.T) {
 	db := openDB(t)
 	t.Cleanup(func() {
-		db.Exec("DELETE FROM kyc_records WHERE full_name LIKE 'Perf User%'")
+		db.Exec("DELETE FROM kyc_records WHERE full_name LIKE ?", "Perf User%")
 	})
 
 	url := baseURL() + "/api/v1/kyc/submit"

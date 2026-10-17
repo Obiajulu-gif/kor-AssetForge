@@ -100,9 +100,14 @@ Create a `.env` file in the backend directory:
 DATABASE_URL=postgresql://postgres:password@localhost:5432/assetforge
 STELLAR_NETWORK=testnet
 STELLAR_HORIZON_URL=https://horizon-testnet.stellar.org
-CONTRACT_ID=<your_deployed_contract_id>
+SOROBAN_ASSET_TOKEN_CONTRACT_ID=<your_deployed_asset_token_contract_address>
+JWT_SECRET=<output_of_scripts/generate_jwt_secret.sh>
 SERVER_PORT=8080
 ```
+
+The backend validates these required settings before connecting to services.
+See [Deployment](docs/DEPLOYMENT.md) for contract configuration and
+[Security](docs/SECURITY.md) for secret requirements.
 
 ## Testing
 
