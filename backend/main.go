@@ -18,6 +18,7 @@ import (
 	"github.com/yourusername/kor-assetforge/handlers"
 	"github.com/yourusername/kor-assetforge/handlers/auth"
 	handlersv2 "github.com/yourusername/kor-assetforge/handlers/v2"
+	versionhandler "github.com/yourusername/kor-assetforge/handlers/version"
 	"github.com/yourusername/kor-assetforge/handlers/webhooks"
 	"github.com/yourusername/kor-assetforge/middleware"
 	"github.com/yourusername/kor-assetforge/models"
@@ -150,6 +151,7 @@ func main() {
 		middleware.RateLimit(20, time.Minute),
 		middleware.CSRFProtection(os.Getenv("CSRF_SECRET")),
 		middleware.VersionFromPath(), // attach api_version to every request context (#124)
+		middleware.EnforcePaginationLimits(), // reject oversized page sizes (#302)
 		middleware.AuditMiddleware(auditService),
 	)
 
@@ -170,7 +172,7 @@ func main() {
 
 	// Swagger documentation
 	router.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
-	router.GET("/api/version/migration-guide", middleware.MigrationGuide)
+	router.GET("/api/version/migration-guide", versionhandler.MigrationGuide)
 
 	// Cache metrics
 	router.GET("/metrics/cache", middleware.CacheMetricsHandler(cacheManager))

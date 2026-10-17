@@ -7,6 +7,7 @@ import (
 	"strconv"
 
 	"github.com/gin-gonic/gin"
+	"github.com/yourusername/kor-assetforge/constants"
 	"github.com/yourusername/kor-assetforge/models"
 	"gorm.io/gorm"
 )
@@ -47,8 +48,11 @@ func (h *AssetsHandler) ListAssets(c *gin.Context) {
 	if page < 1 {
 		page = 1
 	}
-	if pageSize < 1 || pageSize > 100 {
+	if pageSize < 1 {
 		pageSize = 20
+	}
+	if pageSize > constants.MAX_PAGE_SIZE {
+		pageSize = constants.MAX_PAGE_SIZE
 	}
 
 	query := h.db.Model(&models.Asset{})

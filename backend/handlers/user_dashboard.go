@@ -53,6 +53,7 @@ func (h *UserDashboardHandler) GetActivityTimeline(c *gin.Context) {
 	actType := c.Query("type")
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
+	limit = clampPageLimit(limit)
 	if page < 1 {
 		page = 1
 	}

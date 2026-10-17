@@ -114,6 +114,7 @@ func (sh *SearchHandler) Suggest(c *gin.Context) {
 	if limit <= 0 || limit > 20 {
 		limit = 10
 	}
+	limit = clampPageLimit(limit)
 
 	result, err := sh.backend.Suggest(c.Request.Context(), query, limit)
 	if err != nil {
@@ -130,6 +131,7 @@ func (sh *SearchHandler) Suggest(c *gin.Context) {
 // searches for immediate display on focus.
 func (sh *SearchHandler) Autocomplete(c *gin.Context) {
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "10"))
+	limit = clampPageLimit(limit)
 	result, err := sh.suggestions.Autocomplete(c.Request.Context(), c.GetUint("user_id"), c.Query("q"), limit)
 	if err != nil {
 		Logger.Error("search autocomplete failed", zap.Error(err))

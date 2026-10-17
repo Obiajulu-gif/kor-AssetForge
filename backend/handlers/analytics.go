@@ -114,6 +114,7 @@ func (h *AnalyticsHandler) GetValuationHistory(c *gin.Context) {
 
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
+	limit = clampPageLimit(limit)
 	if page < 1 {
 		page = 1
 	}
@@ -257,6 +258,7 @@ func (h *AnalyticsHandler) GetPerformanceHistory(c *gin.Context) {
 		return
 	}
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "90"))
+	limit = clampPageLimit(limit)
 	metrics, err := h.MetricsCalculator.History(assetID, limit)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch performance history"})

@@ -16,6 +16,7 @@ import (
 	"github.com/yourusername/kor-assetforge/handlers"
 	"github.com/yourusername/kor-assetforge/handlers/auth"
 	handlersv2 "github.com/yourusername/kor-assetforge/handlers/v2"
+	versionhandler "github.com/yourusername/kor-assetforge/handlers/version"
 	"github.com/yourusername/kor-assetforge/handlers/webhooks"
 	"github.com/yourusername/kor-assetforge/middleware"
 	"github.com/yourusername/kor-assetforge/models"
@@ -100,6 +101,7 @@ func SetupRouter(db *gorm.DB) *gin.Engine {
 		middleware.RateLimit(20, time.Minute),
 		middleware.CSRFProtection(os.Getenv("CSRF_SECRET")),
 		middleware.VersionFromPath(), // attach api_version to every request context (#124)
+		middleware.EnforcePaginationLimits(), // reject oversized page sizes (#302)
 	)
 
 	// Health check handlers
@@ -400,6 +402,9 @@ func SetupRouter(db *gorm.DB) *gin.Engine {
 			emailTplGroup.POST("/:id/variants", emailTplHandler.CreateVariant)
 		}
 	}
+
+	// API versioning metadata / migration guide (#301)
+	router.GET("/api/version/migration-guide", versionhandler.MigrationGuide)
 
 	// API v2 routes
 	v2 := router.Group("/api/v2")

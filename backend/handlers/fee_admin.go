@@ -202,10 +202,7 @@ func (h *FeeAdminHandler) DeactivateFeeConfig(c *gin.Context) {
 func (h *FeeAdminHandler) ListFeeConfigs(c *gin.Context) {
 	feeType := c.Query("fee_type")
 	page := queryIntDefault(c, "page", 1)
-	limit := queryIntDefault(c, "limit", 20)
-	if limit > 100 {
-		limit = 100
-	}
+	limit := clampPageLimit(queryIntDefault(c, "limit", 20))
 
 	configs, total, err := h.feeService.ListFeeConfigs(feeType, page, limit)
 	if err != nil {
@@ -261,7 +258,7 @@ func (h *FeeAdminHandler) GetFeeAuditLog(c *gin.Context) {
 	}
 
 	page := queryIntDefault(c, "page", 1)
-	limit := queryIntDefault(c, "limit", 20)
+	limit := clampPageLimit(queryIntDefault(c, "limit", 20))
 
 	logs, total, err := h.feeService.GetAuditLog(id, page, limit)
 	if err != nil {

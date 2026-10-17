@@ -6,8 +6,23 @@ import (
 	"strconv"
 
 	"github.com/gin-gonic/gin"
+	"github.com/yourusername/kor-assetforge/constants"
 	"gorm.io/gorm"
 )
+
+// ClampPageSize bounds a caller-supplied page size to the global maximum.
+// Values that are zero or negative fall back to constants.DefaultPageSize and
+// values above constants.MAX_PAGE_SIZE are capped, so handlers can never issue
+// an unbounded query even if the pagination middleware is bypassed.
+func ClampPageSize(limit int) int {
+	if limit <= 0 {
+		return constants.DefaultPageSize
+	}
+	if limit > constants.MAX_PAGE_SIZE {
+		return constants.MAX_PAGE_SIZE
+	}
+	return limit
+}
 
 // Pagination represents the pagination parameters and metadata
 type Pagination struct {
@@ -36,9 +51,7 @@ func GetPaginationParams(c *gin.Context) (int, int) {
 	pageStr := c.DefaultQuery("page", "1")
 
 	limit, _ := strconv.Atoi(limitStr)
-	if limit <= 0 || limit > 100 {
-		limit = 10
-	}
+	limit = ClampPageSize(limit)
 
 	page, _ := strconv.Atoi(pageStr)
 	if page <= 0 {
