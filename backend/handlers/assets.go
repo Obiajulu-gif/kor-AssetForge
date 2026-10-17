@@ -819,7 +819,15 @@ func (h *AssetHandler) ExecuteBatch(c *gin.Context) {
 			batch.EstimatedSecondsRemaining = int64(elapsed.Seconds() * float64(remaining) / float64(i+1))
 		}
 		h.db.Model(&batch).Updates(map[string]interface{}{"completed_count": completedOps, "failed_count": failedOps, "progress_percent": batch.ProgressPercent, "estimated_seconds_remaining": batch.EstimatedSecondsRemaining})
-		BroadcastEvent(TopicTransactions, EventBatchProgress, gin.H{"batch_id": batch.ID, "completed": completedOps, "failed": failedOps, "total": batch.TotalOperations, "progress_percent": batch.ProgressPercent})
+		currentResult := results[len(results)-1]
+		BroadcastEvent(TopicTransactions, EventBatchProgress, gin.H{
+			"batch_id":         batch.ID,
+			"completed":        completedOps,
+			"failed":           failedOps,
+			"total":            batch.TotalOperations,
+			"progress_percent": batch.ProgressPercent,
+			"operation":        currentResult,
+		})
 	}
 
 	batch.CompletedCount = completedOps
@@ -836,7 +844,14 @@ func (h *AssetHandler) ExecuteBatch(c *gin.Context) {
 		batch.Status = "failed"
 		batch.OperationResults = string(resultsJSON)
 		h.db.Save(&batch)
-		apperrors.AbortWithError(c, apperrors.NewBadRequestError("All batch operations failed: "+lastError))
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":             "All batch operations failed: " + lastError,
+			"batch_id":          batch.ID,
+			"status":            batch.Status,
+			"progress_percent":  batch.ProgressPercent,
+			"failed_operations": results,
+			"total_operations":  batch.TotalOperations,
+		})
 		return
 	}
 
@@ -852,13 +867,24 @@ func (h *AssetHandler) ExecuteBatch(c *gin.Context) {
 	h.db.Save(&batch)
 
 	c.JSON(http.StatusCreated, gin.H{
-		"message":          "Batch processed",
-		"batch_id":         batch.ID,
-		"status":           batch.Status,
-		"total_operations": batch.TotalOperations,
-		"completed":        completedOps,
-		"failed":           failedOps,
-		"tx_hash":          batch.TxHash,
+		"message":           "Batch processed",
+		"batch_id":          batch.ID,
+		"status":            batch.Status,
+		"total_operations":  batch.TotalOperations,
+		"completed":         completedOps,
+		"failed":            failedOps,
+		"tx_hash":           batch.TxHash,
+		"progress_percent":  batch.ProgressPercent,
+		"operation_results": results,
+		"failed_operations": func() []models.BatchOperationResult {
+			failed := make([]models.BatchOperationResult, 0, failedOps)
+			for _, result := range results {
+				if !result.Success {
+					failed = append(failed, result)
+				}
+			}
+			return failed
+		}(),
 	})
 }
 
@@ -942,7 +968,27 @@ func (h *AssetHandler) GetBatchStatus(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, batch)
+	var operationResults []models.BatchOperationResult
+	if batch.OperationResults != "" {
+		if err := json.Unmarshal([]byte(batch.OperationResults), &operationResults); err != nil {
+			operationResults = nil
+		}
+	}
+	failedOperations := make([]models.BatchOperationResult, 0)
+	for _, result := range operationResults {
+		if !result.Success {
+			failedOperations = append(failedOperations, result)
+		}
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"batch":             batch,
+		"progress_percent":  batch.ProgressPercent,
+		"completed":         batch.CompletedCount,
+		"failed":            batch.FailedCount,
+		"total_operations":  batch.TotalOperations,
+		"operation_results": operationResults,
+		"failed_operations": failedOperations,
+	})
 }
 
 // ListBatchTransactions returns batch transactions for the authenticated user
