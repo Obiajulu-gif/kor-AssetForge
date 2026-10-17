@@ -20,25 +20,52 @@ jobs:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: password
         options: >-
-          --health-cmd "pg_isready -U postgres -d testdb" --health-interval 10s --health-timeout 5s --health-retries 5
+          --health-cmd "pg_isready -U postgres -d testdb" --health-interval 5s --health-timeout 5s --health-retries 10
     steps:
       - uses: actions/checkout@v4
+
       - name: Set up Go
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@v5
         with:
           go-version: '1.25'
+          cache: true
+          cache-dependency-path: 'backend/go.sum'
+
+      - name: Install postgresql-client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+
+      # Issue #418: PostgreSQL Service Readiness Check
+      - name: Wait for PostgreSQL
+        run: |
+          until pg_isready -h localhost -p 5432 -U postgres -d testdb; do
+            echo "Waiting for PostgreSQL service to become ready..."
+            sleep 1
+          done
+
       - name: Install deps
         run: |
           cd backend
           go mod download
+
+      # Issue #417: Test Environment Variables
       - name: Run backend tests
+        env:
+          DB_HOST: localhost
+          DB_PORT: 5432
+          DB_USER: postgres
+          DB_PASSWORD: password
+          DB_NAME: testdb
+          JWT_SECRET: test-jwt-secret-key-32-chars-minimum
+          PORT: 8080
         run: |
           cd backend
           go test $(go list ./... | grep -v /tests/performance) -v -covermode=atomic -coverprofile=coverage.out
+
       - name: Report backend coverage
         run: |
           cd backend
           go tool cover -func=coverage.out | tail -n 1
+
       - name: Upload backend coverage
         if: always()
         uses: actions/upload-artifact@v4
@@ -50,8 +77,6 @@ jobs:
   test-contracts:
     name: Build & Test Contracts
     runs-on: ubuntu-latest
-    # Smart-contract test tooling currently hits an upstream ed25519-dalek
-    # resolution issue, so this job is informational until that is resolved.
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
@@ -71,15 +96,24 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: 'frontend/package-lock.json'
+
       - name: Install dependencies
         run: |
           cd frontend
           npm ci
+
       - name: Run frontend unit tests
+        env:
+          NEXT_PUBLIC_API_URL: http://localhost:8080
         run: |
           cd frontend
           npm test -- --ci
+
       - name: Run frontend build
+        env:
+          NEXT_PUBLIC_API_URL: http://localhost:8080
         run: |
           cd frontend
           npm run build
@@ -87,7 +121,6 @@ jobs:
   e2e-frontend:
     name: Frontend E2E
     runs-on: ubuntu-latest
-    # E2E coverage is being stabilized; failures are reported but do not block.
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
@@ -95,22 +128,34 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: 'frontend/package-lock.json'
+
       - name: Install dependencies
         run: |
           cd frontend
           npm ci
+
       - name: Install Playwright browsers
         run: |
           cd frontend
           npx playwright install --with-deps chromium
+
       - name: Build frontend
+        env:
+          NEXT_PUBLIC_API_URL: http://localhost:8080
         run: |
           cd frontend
           npm run build
+
       - name: Run E2E tests
+        env:
+          PORT: 3000
+          NEXT_PUBLIC_API_URL: http://localhost:8080
         run: |
           cd frontend
           npx playwright test
+
       - name: Upload Playwright report
         if: always()
         uses: actions/upload-artifact@v4
@@ -128,6 +173,8 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: 'mobile/package-lock.json'
       - name: Install mobile deps
         run: |
           cd mobile
