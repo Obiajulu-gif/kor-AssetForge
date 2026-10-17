@@ -33,6 +33,14 @@ jobs:
           cd backend
           go mod download
 
+      # Issue #309: Database Migration Rollback Tests
+      - name: Run migration rollback tests
+        env:
+          SQL_TEST_DATABASE_URL: postgres://postgres:password@localhost:5432/testdb?sslmode=disable
+        run: |
+          chmod +x scripts/test_migrations.sh scripts/migrate.sh
+          ./scripts/test_migrations.sh
+
       # Issue #417: Test Environment Variables
       - name: Run backend tests
         env:

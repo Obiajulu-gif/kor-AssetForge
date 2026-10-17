@@ -59,3 +59,91 @@ func TestLoadReplicaConfigDefaults(t *testing.T) {
 	assert.Equal(t, 15*time.Second, cfg.HealthInterval)
 	assert.True(t, cfg.FailoverToPrimary)
 }
+
+func TestDBPoolConfigValidation(t *testing.T) {
+	valid := DBPoolConfig{
+		MaxOpen:      25,
+		MaxIdle:      10,
+		MaxLifetime:  30 * time.Minute,
+		MaxIdleTime:  5 * time.Minute,
+		ConnectRetry: 3,
+		ConnectWait:  time.Second,
+	}
+	assert.NoError(t, valid.Validate())
+
+	invalidOpen := valid
+	invalidOpen.MaxOpen = 0
+	assert.Error(t, invalidOpen.Validate())
+
+	invalidIdle := valid
+	invalidIdle.MaxIdle = -1
+	assert.Error(t, invalidIdle.Validate())
+
+	invalidRetry := valid
+	invalidRetry.ConnectRetry = -1
+	assert.Error(t, invalidRetry.Validate())
+}
+
+func TestDBPoolConfigWarnings(t *testing.T) {
+	// 1. MaxIdle > MaxOpen
+	cfgIdleHigher := DBPoolConfig{
+		MaxOpen: 10,
+		MaxIdle: 20,
+	}
+	warnings := cfgIdleHigher.CheckWarnings()
+	assert.NotEmpty(t, warnings)
+	assert.Equal(t, 10, cfgIdleHigher.MaxIdle, "MaxIdle should be capped to MaxOpen")
+
+	// 2. MaxOpen > 100
+	cfgHighOpen := DBPoolConfig{
+		MaxOpen: 150,
+		MaxIdle: 10,
+	}
+	warnings = cfgHighOpen.CheckWarnings()
+	assert.Contains(t, warnings[0], "is high")
+
+	// 3. MaxOpen < 5
+	cfgLowOpen := DBPoolConfig{
+		MaxOpen: 3,
+		MaxIdle: 2,
+	}
+	warnings = cfgLowOpen.CheckWarnings()
+	assert.Contains(t, warnings[0], "is very low")
+
+	// 4. MaxLifetime == 0
+	cfgZeroLifetime := DBPoolConfig{
+		MaxOpen:     25,
+		MaxIdle:     10,
+		MaxLifetime: 0,
+	}
+	warnings = cfgZeroLifetime.CheckWarnings()
+	assert.Contains(t, warnings[0], "DB_CONN_MAX_LIFETIME is 0")
+
+	// 5. MaxIdleTime > MaxLifetime
+	cfgIdleExceedsLifetime := DBPoolConfig{
+		MaxOpen:     25,
+		MaxIdle:     10,
+		MaxLifetime: 5 * time.Minute,
+		MaxIdleTime: 10 * time.Minute,
+	}
+	warnings = cfgIdleExceedsLifetime.CheckWarnings()
+	assert.Contains(t, warnings[0], "greater than DB_CONN_MAX_LIFETIME")
+}
+
+func TestLoadDBPoolConfigEnvironment(t *testing.T) {
+	t.Setenv("DB_MAX_OPEN_CONNS", "50")
+	t.Setenv("DB_MAX_IDLE_CONNS", "25")
+	t.Setenv("DB_CONN_MAX_LIFETIME", "45m")
+	t.Setenv("DB_CONN_MAX_IDLE_TIME", "10m")
+	t.Setenv("DB_CONNECT_RETRIES", "5")
+	t.Setenv("DB_CONNECT_RETRY_WAIT", "2s")
+
+	cfg := LoadDBPoolConfig()
+	assert.Equal(t, 50, cfg.MaxOpen)
+	assert.Equal(t, 25, cfg.MaxIdle)
+	assert.Equal(t, 45*time.Minute, cfg.MaxLifetime)
+	assert.Equal(t, 10*time.Minute, cfg.MaxIdleTime)
+	assert.Equal(t, 5, cfg.ConnectRetry)
+	assert.Equal(t, 2*time.Second, cfg.ConnectWait)
+}
+

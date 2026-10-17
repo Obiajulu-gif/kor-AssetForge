@@ -212,6 +212,11 @@ func (h *AuthHandler) Register(c *gin.Context) {
 	}
 
 	if err := h.db.Create(&user).Error; err != nil {
+		errMsg := strings.ToLower(err.Error())
+		if strings.Contains(errMsg, "unique") || strings.Contains(errMsg, "duplicate") {
+			apperrors.AbortWithError(c, apperrors.NewConflictError("User already exists with this email, username, or Stellar address"))
+			return
+		}
 		apperrors.AbortWithError(c, apperrors.NewInternalError("Failed to create user"))
 		return
 	}
@@ -520,6 +525,53 @@ func (h *AuthHandler) Logout(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{"message": "Logged out successfully"})
 }
+
+// DeleteAccount handles user account deletion (soft-delete) (#310)
+// @Summary Delete user account
+// @Description Soft-deletes user account, invalidates sessions, and frees up unique constraints for account recreation
+// @Tags auth
+// @Security BearerAuth
+// @Success 200 {object} map[string]string
+// @Failure 401 {object} apperrors.ErrorResponse
+// @Failure 404 {object} apperrors.ErrorResponse
+// @Failure 500 {object} apperrors.ErrorResponse
+// @Router /auth/account [delete]
+func (h *AuthHandler) DeleteAccount(c *gin.Context) {
+	userID, exists := c.Get("user_id")
+	if !exists {
+		apperrors.AbortWithError(c, apperrors.NewUnauthorizedError("User not authenticated"))
+		return
+	}
+
+	var user models.User
+	if err := h.db.First(&user, userID).Error; err != nil {
+		apperrors.AbortWithError(c, apperrors.NewNotFoundError("User not found"))
+		return
+	}
+
+	err := h.db.Transaction(func(tx *gorm.DB) error {
+		// Invalidate active sessions
+		if err := tx.Where("user_id = ?", user.ID).Delete(&models.UserSession{}).Error; err != nil {
+			return err
+		}
+		// Invalidate recovery codes
+		if err := tx.Where("user_id = ?", user.ID).Delete(&models.RecoveryCode{}).Error; err != nil {
+			return err
+		}
+		// Soft-delete the user
+		if err := tx.Delete(&user).Error; err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		apperrors.AbortWithError(c, apperrors.NewInternalError("Failed to delete user account"))
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Account deleted successfully"})
+}
+
 
 // GetProfile returns the current user's profile
 // @Summary Get user profile

@@ -93,12 +93,84 @@ type DBPoolConfig struct {
 	ConnectWait  time.Duration
 }
 
-func LoadDBPoolConfig() DBPoolConfig {
-	return DBPoolConfig{
-		MaxOpen: envInt("DB_MAX_OPEN_CONNS", 25), MaxIdle: envInt("DB_MAX_IDLE_CONNS", 10),
-		MaxLifetime: envDuration("DB_CONN_MAX_LIFETIME", 30*time.Minute), MaxIdleTime: envDuration("DB_CONN_MAX_IDLE_TIME", 5*time.Minute),
-		ConnectRetry: envInt("DB_CONNECT_RETRIES", 3), ConnectWait: envDuration("DB_CONNECT_RETRY_WAIT", time.Second),
+// Validate checks that connection pool bounds are physically meaningful.
+func (c *DBPoolConfig) Validate() error {
+	if c.MaxOpen <= 0 {
+		return fmt.Errorf("DB_MAX_OPEN_CONNS must be greater than 0, got %d", c.MaxOpen)
 	}
+	if c.MaxIdle < 0 {
+		return fmt.Errorf("DB_MAX_IDLE_CONNS cannot be negative, got %d", c.MaxIdle)
+	}
+	if c.ConnectRetry < 0 {
+		return fmt.Errorf("DB_CONNECT_RETRIES cannot be negative, got %d", c.ConnectRetry)
+	}
+	return nil
+}
+
+// CheckWarnings inspects pool settings for common misconfigurations and logs actionable warnings.
+// It returns the list of generated warning messages.
+func (c *DBPoolConfig) CheckWarnings() []string {
+	var warnings []string
+
+	if c.MaxIdle > c.MaxOpen {
+		msg := fmt.Sprintf("DB_MAX_IDLE_CONNS (%d) exceeds DB_MAX_OPEN_CONNS (%d); capping MaxIdle to MaxOpen", c.MaxIdle, c.MaxOpen)
+		warnings = append(warnings, msg)
+		log.Printf("Warning: %s", msg)
+		c.MaxIdle = c.MaxOpen
+	}
+
+	if c.MaxOpen > 100 {
+		msg := fmt.Sprintf("DB_MAX_OPEN_CONNS (%d) is high; ensure PostgreSQL max_connections is sized to support all application instances", c.MaxOpen)
+		warnings = append(warnings, msg)
+		log.Printf("Warning: %s", msg)
+	}
+
+	if c.MaxOpen < 5 {
+		msg := fmt.Sprintf("DB_MAX_OPEN_CONNS (%d) is very low (< 5); this may lead to connection pool starvation under concurrent load", c.MaxOpen)
+		warnings = append(warnings, msg)
+		log.Printf("Warning: %s", msg)
+	}
+
+	if c.MaxLifetime == 0 {
+		msg := "DB_CONN_MAX_LIFETIME is 0 (unlimited); connections will never be recycled, which can cause issues with load balancers or database failover"
+		warnings = append(warnings, msg)
+		log.Printf("Warning: %s", msg)
+	}
+
+	if c.MaxLifetime > 0 && c.MaxIdleTime > c.MaxLifetime {
+		msg := fmt.Sprintf("DB_CONN_MAX_IDLE_TIME (%v) is greater than DB_CONN_MAX_LIFETIME (%v); idle connections will be recycled by max lifetime first", c.MaxIdleTime, c.MaxLifetime)
+		warnings = append(warnings, msg)
+		log.Printf("Warning: %s", msg)
+	}
+
+	return warnings
+}
+
+func LoadDBPoolConfig() DBPoolConfig {
+	cfg := DBPoolConfig{
+		MaxOpen:      envInt("DB_MAX_OPEN_CONNS", 25),
+		MaxIdle:      envInt("DB_MAX_IDLE_CONNS", 10),
+		MaxLifetime:  envDuration("DB_CONN_MAX_LIFETIME", 30*time.Minute),
+		MaxIdleTime:  envDuration("DB_CONN_MAX_IDLE_TIME", 5*time.Minute),
+		ConnectRetry: envInt("DB_CONNECT_RETRIES", 3),
+		ConnectWait:  envDuration("DB_CONNECT_RETRY_WAIT", time.Second),
+	}
+
+	if err := cfg.Validate(); err != nil {
+		log.Printf("Warning: invalid database pool configuration: %v; applying safe defaults", err)
+		if cfg.MaxOpen <= 0 {
+			cfg.MaxOpen = 25
+		}
+		if cfg.MaxIdle < 0 {
+			cfg.MaxIdle = 10
+		}
+		if cfg.ConnectRetry < 0 {
+			cfg.ConnectRetry = 3
+		}
+	}
+
+	cfg.CheckWarnings()
+	return cfg
 }
 
 // CacheLockWaitTimeout returns how long a request should wait on another
@@ -110,11 +182,16 @@ func CacheLockWaitTimeout() time.Duration {
 }
 
 func (c DBPoolConfig) apply(db *sql.DB) {
-	db.SetMaxOpenConns(c.MaxOpen)
-	db.SetMaxIdleConns(c.MaxIdle)
+	if c.MaxOpen > 0 {
+		db.SetMaxOpenConns(c.MaxOpen)
+	}
+	if c.MaxIdle >= 0 {
+		db.SetMaxIdleConns(c.MaxIdle)
+	}
 	db.SetConnMaxLifetime(c.MaxLifetime)
 	db.SetConnMaxIdleTime(c.MaxIdleTime)
 }
+
 
 func envInt(key string, fallback int) int {
 	if value, err := strconv.Atoi(os.Getenv(key)); err == nil && value > 0 {

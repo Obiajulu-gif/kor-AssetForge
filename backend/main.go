@@ -112,11 +112,11 @@ func main() {
 	// Setup authentication
 	authConfig := &auth.AuthConfig{
 		JWTSecret:            runtimeConfig.JWTSecret,
-		JWTExpirationHours:   getEnvIntOrDefault("JWT_EXPIRATION_HOURS", 24),
-		RefreshTokenHours:    getEnvIntOrDefault("REFRESH_TOKEN_HOURS", 168),
-		EmailTokenHours:      getEnvIntOrDefault("EMAIL_TOKEN_HOURS", 24),
-		PasswordResetMinutes: getEnvIntOrDefault("PASSWORD_RESET_HOURS", 30),
-		BcryptCost:           getEnvIntOrDefault("BCRYPT_COST", 12),
+		JWTExpirationHours:   config.EnvIntOrDefault("JWT_EXPIRATION_HOURS", 24),
+		RefreshTokenHours:    config.EnvIntOrDefault("REFRESH_TOKEN_HOURS", 168),
+		EmailTokenHours:      config.EnvIntOrDefault("EMAIL_TOKEN_HOURS", 24),
+		PasswordResetMinutes: config.EnvIntOrDefault("PASSWORD_RESET_HOURS", 30),
+		BcryptCost:           config.EnvIntOrDefault("BCRYPT_COST", 12),
 	}
 	emailService := services.NewEmailServiceFromEnv()
 	reportScheduler := services.NewReportSchedulerService(db, emailService)
@@ -151,12 +151,8 @@ func main() {
 		handlers.GlobalErrorHandler(),
 		handlers.MetricsMiddleware(),
 		handlers.BusinessMetricsMiddleware(nil),
- refactor/backend-structure-error-handling-291-294
 		middleware.RequestSizeLimiter(constants.DefaultRequestSize),
-
-		middleware.RequestSizeLimiter(2<<20),
 		middleware.SecurityHeaders(config.LoadSecurityHeadersConfig()),
- main
 		middleware.RequireJSON(),
 		middleware.RateLimit(constants.GlobalRateLimit, constants.GlobalRateLimitWindowMinutes*time.Minute),
 		middleware.CSRFProtection(os.Getenv("CSRF_SECRET")),
