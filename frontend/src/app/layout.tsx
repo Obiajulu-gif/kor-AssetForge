@@ -1,4 +1,5 @@
 import type { Metadata, Viewport } from "next";
+import type { ReactNode } from "react";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import "@/styles/forms.css";
@@ -19,10 +20,35 @@ const geistMono = Geist_Mono({
   subsets: ["latin"],
 });
 
+const siteName = "kor-AssetForge";
+const siteDescription =
+  "Decentralized marketplace for tokenizing and trading real-world assets on Stellar";
+
+// metadataBase resolves relative Open Graph / Twitter image URLs into the
+// absolute URLs crawlers require. Set NEXT_PUBLIC_SITE_URL in each deployment.
 export const metadata: Metadata = {
-  title: "kor-AssetForge",
-  description: "Decentralized marketplace for tokenizing and trading real-world assets on Stellar",
-  applicationName: "kor-AssetForge",
+  metadataBase: new URL(process.env.NEXT_PUBLIC_SITE_URL || "http://localhost:3000"),
+  title: {
+    default: siteName,
+    template: `%s | ${siteName}`,
+  },
+  description: siteDescription,
+  applicationName: siteName,
+  keywords: ["real-world assets", "tokenization", "Stellar", "Soroban", "fractional ownership"],
+  openGraph: {
+    type: "website",
+    siteName,
+    title: siteName,
+    description: siteDescription,
+    url: "/",
+    images: [{ url: "/icon-512.png", width: 512, height: 512, alt: siteName }],
+  },
+  twitter: {
+    card: "summary",
+    title: siteName,
+    description: siteDescription,
+    images: ["/icon-512.png"],
+  },
   appleWebApp: {
     capable: true,
     title: "AssetForge",
@@ -46,7 +72,7 @@ import { getLocale, getMessages } from 'next-intl/server';
 export default async function RootLayout({
   children,
 }: Readonly<{
-  children: React.ReactNode;
+  children: ReactNode;
 }>) {
   const locale = await getLocale();
   const messages = await getMessages();

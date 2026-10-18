@@ -107,6 +107,12 @@ jobs:
           cd frontend
           npm ci
 
+      # Issue #421: generate Next.js 16 route types, then type-check
+      - name: Run frontend type check
+        run: |
+          cd frontend
+          npm run typecheck
+
       - name: Run frontend unit tests
         env:
           NEXT_PUBLIC_API_URL: http://localhost:8080
