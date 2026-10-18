@@ -4,7 +4,6 @@ import (
 	"context"
 	"log"
 	"os"
-	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -14,6 +13,7 @@ import (
 	ginSwagger "github.com/swaggo/gin-swagger"
 	"github.com/ulule/limiter/v3"
 	"github.com/yourusername/kor-assetforge/config"
+	"github.com/yourusername/kor-assetforge/constants"
 	_ "github.com/yourusername/kor-assetforge/docs"
 	"github.com/yourusername/kor-assetforge/handlers"
 	"github.com/yourusername/kor-assetforge/handlers/auth"
@@ -51,6 +51,10 @@ func main() {
 	// Load environment variables
 	if err := godotenv.Load(); err != nil {
 		log.Println("No .env file found, using system environment variables")
+	}
+	runtimeConfig, err := config.LoadRuntimeConfig()
+	if err != nil {
+		log.Fatalf("Invalid application configuration: %v", err)
 	}
 
 	// Initialize database
@@ -101,16 +105,19 @@ func main() {
 			rateLimiterMiddleware = rl.Middleware()
 		}
 	}
-	_ = rateLimiterMiddleware // available for use on individual routes if needed
+	// The limiter is attached to routes that opt into Redis-backed throttling.
+	if rateLimiterMiddleware != nil {
+		log.Printf("Redis-backed rate limiter initialized")
+	}
 
 	// Setup authentication
 	authConfig := &auth.AuthConfig{
-		JWTSecret:            getEnvOrDefault("JWT_SECRET", "your-super-secret-jwt-key-change-in-production"),
-		JWTExpirationHours:   getEnvIntOrDefault("JWT_EXPIRATION_HOURS", 24),
-		RefreshTokenHours:    getEnvIntOrDefault("REFRESH_TOKEN_HOURS", 168),
-		EmailTokenHours:      getEnvIntOrDefault("EMAIL_TOKEN_HOURS", 24),
-		PasswordResetMinutes: getEnvIntOrDefault("PASSWORD_RESET_HOURS", 30),
-		BcryptCost:           getEnvIntOrDefault("BCRYPT_COST", 12),
+		JWTSecret:            runtimeConfig.JWTSecret,
+		JWTExpirationHours:   config.EnvIntOrDefault("JWT_EXPIRATION_HOURS", 24),
+		RefreshTokenHours:    config.EnvIntOrDefault("REFRESH_TOKEN_HOURS", 168),
+		EmailTokenHours:      config.EnvIntOrDefault("EMAIL_TOKEN_HOURS", 24),
+		PasswordResetMinutes: config.EnvIntOrDefault("PASSWORD_RESET_HOURS", 30),
+		BcryptCost:           config.EnvIntOrDefault("BCRYPT_COST", 12),
 	}
 	emailService := services.NewEmailServiceFromEnv()
 	reportScheduler := services.NewReportSchedulerService(db, emailService)
@@ -145,10 +152,10 @@ func main() {
 		handlers.GlobalErrorHandler(),
 		handlers.MetricsMiddleware(),
 		handlers.BusinessMetricsMiddleware(nil),
-		middleware.RequestSizeLimiter(2<<20),
+		middleware.RequestSizeLimiter(constants.DefaultRequestSize),
 		middleware.SecurityHeaders(config.LoadSecurityHeadersConfig()),
 		middleware.RequireJSON(),
-		middleware.RateLimit(20, time.Minute),
+		middleware.RateLimit(constants.GlobalRateLimit, constants.GlobalRateLimitWindowMinutes*time.Minute),
 		middleware.CSRFProtection(os.Getenv("CSRF_SECRET")),
 		middleware.VersionFromPath(), // attach api_version to every request context (#124)
 		middleware.EnforcePaginationLimits(), // reject oversized page sizes (#302)
@@ -272,7 +279,10 @@ func main() {
 
 		// Asset routes (with write-through cache invalidation)
 		workflowService := services.NewWorkflowService(db, emailService)
-		assetHandler := handlers.NewAssetHandler(db, stellarClient, redisClient, emailService, workflowService)
+		assetHandler, err := handlers.NewAssetHandler(db, stellarClient, redisClient, emailService, runtimeConfig.AssetTokenContractID, workflowService)
+		if err != nil {
+			log.Fatalf("Invalid asset handler configuration: %v", err)
+		}
 		v1.POST("/assets/tokenize",
 			middleware.InvalidateOnWrite(cacheManager, "kor:asset:*"),
 			middleware.InvalidateOnWriteTags(cacheManager, "asset"),
@@ -282,7 +292,7 @@ func main() {
 			middleware.InvalidateOnWriteTags(cacheManager, "asset"),
 			assetHandler.TokenizeAsset)
 		v1.GET("/assets",
-			middleware.HTTPCache(cacheManager, 5*time.Minute, "kor:asset", nil, "asset"),
+			middleware.HTTPCache(cacheManager, constants.AssetCacheTTLMinutes*time.Minute, "kor:asset", nil, "asset"),
 			assetHandler.ListAssets)
 		v1.GET("/assets/:id",
 			middleware.HTTPCache(cacheManager, 5*time.Minute, "kor:asset", nil, "asset"),
@@ -303,7 +313,7 @@ func main() {
 
 		// Oracle price feed routes (#104)
 		v1.GET("/oracle/price",
-			middleware.HTTPCache(cacheManager, 1*time.Minute, "kor:oracle", nil),
+			middleware.HTTPCache(cacheManager, constants.OracleCacheTTLMinutes*time.Minute, "kor:oracle", nil),
 			assetHandler.GetOraclePrice)
 		v1.GET("/assets/:id/oracle-price",
 			middleware.HTTPCache(cacheManager, 1*time.Minute, "kor:oracle", nil),
@@ -684,7 +694,7 @@ func main() {
 	// WebSocket routes (#54) — outside v1 group so the CSRF/JSON middleware
 	// does not block the Upgrade handshake.
 	wsHandler := handlers.NewWebSocketHandler(
-		getEnvOrDefault("JWT_SECRET", "your-super-secret-jwt-key-change-in-production"),
+		runtimeConfig.JWTSecret,
 		config.LoadWSRateLimitConfig(),
 	)
 	router.GET("/ws", wsHandler.HandleWS)
@@ -702,7 +712,7 @@ func main() {
 	// Start server
 	port := os.Getenv("SERVER_PORT")
 	if port == "" {
-		port = "8080"
+		port = constants.DefaultServerPort
 	}
 
 	log.Printf("Starting server on port %s", port)
@@ -711,18 +721,3 @@ func main() {
 	}
 }
 
-func getEnvOrDefault(key, defaultValue string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return defaultValue
-}
-
-func getEnvIntOrDefault(key string, defaultValue int) int {
-	if v := os.Getenv(key); v != "" {
-		if i, err := strconv.Atoi(v); err == nil {
-			return i
-		}
-	}
-	return defaultValue
-}

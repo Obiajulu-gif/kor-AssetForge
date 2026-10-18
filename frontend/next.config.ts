@@ -2,13 +2,48 @@ import type { NextConfig } from "next";
 import path from "node:path";
 
 const nextConfig: NextConfig = {
+  // React 19 compiler (stable in Next.js 16). "annotation" mode only compiles
+  // components and hooks that opt in with the "use memo" directive, so it can
+  // be adopted incrementally while existing components still have
+  // react-hooks compiler-rule violations. See docs/NEXTJS_16_MIGRATION.md.
+  reactCompiler: {
+    compilationMode: "annotation",
+  },
   images: {
     formats: ["image/avif", "image/webp"],
     remotePatterns: [
-      { protocol: "https", hostname: "ipfs.io" },
-      { protocol: "https", hostname: "gateway.pinata.cloud" },
-      { protocol: "https", hostname: "cloudflare-ipfs.com" },
-      { protocol: "https", hostname: "images.unsplash.com" },
+      {
+        protocol: "https",
+        hostname: "ipfs.io",
+        port: "",
+        pathname: "/**",
+      },
+      {
+        protocol: "https",
+        hostname: "gateway.pinata.cloud",
+        port: "",
+        pathname: "/**",
+      },
+      {
+        protocol: "https",
+        hostname: "cloudflare-ipfs.com",
+        port: "",
+        pathname: "/**",
+      },
+      {
+        protocol: "https",
+        hostname: "images.unsplash.com",
+        port: "",
+        pathname: "/**",
+      },
+      ...(process.env.NEXT_PUBLIC_ADDITIONAL_IMAGE_DOMAINS
+        ? process.env.NEXT_PUBLIC_ADDITIONAL_IMAGE_DOMAINS.split(",").map((domain) => ({
+            protocol: "https" as const,
+            hostname: domain.trim(),
+            port: "",
+            pathname: "/**",
+          }))
+        : []),
     ],
   },
   // This is the alias installed by next-intl/plugin. Keeping it explicit

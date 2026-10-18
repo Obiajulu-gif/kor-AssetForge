@@ -1,12 +1,12 @@
 "use client";
 
-import React from 'react';
+import React, { useTransition } from 'react';
 import { useLocale } from 'next-intl';
-import { useRouter } from 'next/navigation';
+import { setLocale } from '@/actions/locale';
 
 const LanguageSelector: React.FC = () => {
   const locale = useLocale();
-  const router = useRouter();
+  const [isPending, startTransition] = useTransition();
 
   const languages = [
     { code: 'en', name: 'English' },
@@ -16,14 +16,16 @@ const LanguageSelector: React.FC = () => {
   ];
 
   const handleLanguageChange = (languageCode: string) => {
-    document.cookie = `NEXT_LOCALE=${languageCode}; path=/; max-age=31536000; SameSite=Lax`;
-    router.refresh();
+    startTransition(async () => {
+      await setLocale(languageCode);
+    });
   };
 
   return (
     <div className="language-selector">
       <select
         value={locale}
+        disabled={isPending}
         onChange={(e) => handleLanguageChange(e.target.value)}
         className="language-select border rounded p-1 text-sm bg-background text-foreground"
       >

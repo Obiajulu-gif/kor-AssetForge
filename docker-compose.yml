@@ -38,6 +38,8 @@ services:
       DATABASE_URL: postgresql://postgres:password@postgres:5432/assetforge?sslmode=disable
       STELLAR_NETWORK: testnet
       STELLAR_HORIZON_URL: https://horizon-testnet.stellar.org
+      SOROBAN_ASSET_TOKEN_CONTRACT_ID: ${SOROBAN_ASSET_TOKEN_CONTRACT_ID:-}
+      JWT_SECRET: ${JWT_SECRET:-}
       SERVER_PORT: 8080
       REDIS_URL: redis:6379
     ports:
