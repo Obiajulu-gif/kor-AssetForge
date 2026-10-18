@@ -58,6 +58,7 @@ func (h *ComparisonHandler) Compare(c *gin.Context) {
 func (h *ComparisonHandler) ListHistory(c *gin.Context) {
 	userID := currentUserID(c)
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
+	limit = clampPageLimit(limit)
 	records, err := h.Service.ListHistory(userID, limit)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch comparison history"})

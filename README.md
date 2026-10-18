@@ -143,6 +143,10 @@ MIT License - see [LICENSE](LICENSE) file for details
 - [Stellar Documentation](https://developers.stellar.org/)
 - [Soroban Documentation](https://soroban.stellar.org/docs)
 - [Stellar Go SDK](https://github.com/stellar/go)
+- [API Reference](docs/API.md)
+- [API v1 → v2 Migration Guide](docs/API_MIGRATION_V1_TO_V2.md)
+- [API Changelog](docs/api/CHANGELOG.md)
+- [Performance Testing](docs/PERFORMANCE_TESTING.md)
 - [Compliance Reporting Docs](docs/compliance_reporting.md)
 - [Gas Optimization Notes](docs/gas_optimization.md)
 

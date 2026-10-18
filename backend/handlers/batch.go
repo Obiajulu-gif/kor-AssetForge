@@ -138,9 +138,7 @@ func (h *BatchHandler) ListBatches(c *gin.Context) {
 	if l := c.Query("limit"); l != "" {
 		fmt.Sscanf(l, "%d", &limit)
 	}
-	if limit > 100 {
-		limit = 100
-	}
+	limit = clampPageLimit(limit)
 	if page < 1 {
 		page = 1
 	}

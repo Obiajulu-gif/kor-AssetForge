@@ -156,6 +156,7 @@ func (h *FeeDistributionAdminHandler) ListRuns(c *gin.Context) {
 	if l, err := strconv.Atoi(c.Query("limit")); err == nil && l > 0 {
 		limit = l
 	}
+	limit = clampPageLimit(limit)
 
 	runs, err := h.distributionService.ListRuns(limit)
 	if err != nil {

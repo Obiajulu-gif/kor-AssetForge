@@ -266,6 +266,7 @@ func (mmh *MarketMakerHandler) GetHealthChecks(c *gin.Context) {
 			limit = l
 		}
 	}
+	limit = clampPageLimit(limit)
 
 	checks, err := mmh.mmService.GetHealthChecks(uint(id), limit)
 	if err != nil {

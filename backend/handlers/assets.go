@@ -195,10 +195,7 @@ func (h *AssetHandler) ListAssets(c *gin.Context) {
 	if page == 0 {
 		page = 1
 	}
-	limit := query.Limit
-	if limit == 0 {
-		limit = 10
-	}
+	limit := clampPageLimit(query.Limit)
 
 	var assets []models.Asset
 	var total int64
@@ -245,10 +242,7 @@ func (h *AssetHandler) ListTransactions(c *gin.Context) {
 	if page == 0 {
 		page = 1
 	}
-	limit := queryParams.Limit
-	if limit == 0 {
-		limit = 10
-	}
+	limit := clampPageLimit(queryParams.Limit)
 
 	var transactions []models.Transaction
 	var total int64
@@ -1009,10 +1003,7 @@ func (h *AssetHandler) ListBatchTransactions(c *gin.Context) {
 	if page == 0 {
 		page = 1
 	}
-	limit := query.Limit
-	if limit == 0 {
-		limit = 10
-	}
+	limit := clampPageLimit(query.Limit)
 
 	var batches []models.BatchTransaction
 	var total int64
