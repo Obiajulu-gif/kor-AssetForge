@@ -2,6 +2,13 @@ import type { NextConfig } from "next";
 import path from "node:path";
 
 const nextConfig: NextConfig = {
+  // React 19 compiler (stable in Next.js 16). "annotation" mode only compiles
+  // components and hooks that opt in with the "use memo" directive, so it can
+  // be adopted incrementally while existing components still have
+  // react-hooks compiler-rule violations. See docs/NEXTJS_16_MIGRATION.md.
+  reactCompiler: {
+    compilationMode: "annotation",
+  },
   images: {
     formats: ["image/avif", "image/webp"],
     remotePatterns: [
