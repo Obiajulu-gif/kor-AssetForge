@@ -82,6 +82,7 @@ type BatchTransaction struct {
 	UserID          uint           `gorm:"not null;index" json:"user_id"`
 	User            User           `gorm:"foreignKey:UserID" json:"user,omitempty"`
 	Operations      string         `gorm:"type:jsonb;not null" json:"operations"` // JSON array of operations
+	Results         string         `gorm:"type:jsonb" json:"results,omitempty"`   // per-operation execution results
 	Status          string         `gorm:"default:'pending'" json:"status"`       // pending, processing, completed, failed, rolled_back
 	TxHash          string         `gorm:"uniqueIndex" json:"tx_hash,omitempty"`
 	ErrorDetails    string         `gorm:"type:text" json:"error_details,omitempty"`

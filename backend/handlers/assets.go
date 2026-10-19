@@ -780,6 +780,69 @@ func (h *AssetHandler) ExecuteBatch(c *gin.Context) {
 	})
 }
 
+// RollbackBatch compensates the database effects of a completed batch. It is
+// deliberately explicit about unsupported operations: silently pretending to
+// roll back an on-chain or externally-triggered operation would be unsafe.
+// POST /batch/:id/rollback
+func (h *AssetHandler) RollbackBatch(c *gin.Context) {
+	userID, exists := c.Get("user_id")
+	if !exists {
+		apperrors.AbortWithError(c, apperrors.NewUnauthorizedError("User not authenticated"))
+		return
+	}
+	var batch models.BatchTransaction
+	if err := h.db.First(&batch, c.Param("id")).Error; err != nil {
+		apperrors.AbortWithError(c, apperrors.NewNotFoundError("Batch not found"))
+		return
+	}
+	if batch.UserID != userID.(uint) {
+		apperrors.AbortWithError(c, apperrors.NewForbiddenError("Access denied"))
+		return
+	}
+	if batch.Status != models.BatchStatusCompleted && batch.Status != models.BatchStatusCompletedWithErrors {
+		apperrors.AbortWithError(c, apperrors.NewBadRequestError("Only completed batches can be rolled back"))
+		return
+	}
+	var ops []models.BatchOperation
+	if err := json.Unmarshal([]byte(batch.Operations), &ops); err != nil {
+		apperrors.AbortWithError(c, apperrors.NewInternalError("Batch operations are invalid"))
+		return
+	}
+	for _, op := range ops {
+		if op.Type == "cancel_listing" {
+			apperrors.AbortWithError(c, apperrors.NewBadRequestError("Batches containing cancel_listing cannot be rolled back"))
+			return
+		}
+	}
+	tx := h.db.Begin()
+	for i, op := range ops {
+		switch op.Type {
+		case "transfer":
+			if err := tx.Where("tx_hash = ?", fmt.Sprintf("batch_%d_op_%d", batch.ID, i)).Delete(&models.Transaction{}).Error; err != nil {
+				tx.Rollback()
+				apperrors.AbortWithError(c, apperrors.NewInternalError("Failed to roll back batch"))
+				return
+			}
+		case "list":
+			if err := tx.Model(&models.Listing{}).Where("listing_id = ?", fmt.Sprintf("batch_listing_%d_%d", batch.ID, i)).Update("active", false).Error; err != nil {
+				tx.Rollback()
+				apperrors.AbortWithError(c, apperrors.NewInternalError("Failed to roll back batch"))
+				return
+			}
+		}
+	}
+	if err := tx.Model(&batch).Update("status", models.BatchStatusRolledBack).Error; err != nil {
+		tx.Rollback()
+		apperrors.AbortWithError(c, apperrors.NewInternalError("Failed to mark batch rolled back"))
+		return
+	}
+	if err := tx.Commit().Error; err != nil {
+		apperrors.AbortWithError(c, apperrors.NewInternalError("Failed to commit rollback"))
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "Batch rolled back", "batch_id": batch.ID, "status": models.BatchStatusRolledBack})
+}
+
 // GetBatchStatus returns the status of a batch transaction
 func (h *AssetHandler) GetBatchStatus(c *gin.Context) {
 	batchID := c.Param("id")

@@ -301,6 +301,7 @@ func main() {
 		v1.POST("/batch/execute",
 			middleware.InvalidateOnWrite(cacheManager, "kor:asset:*"),
 			assetHandler.ExecuteBatch)
+		v1.POST("/batch/:id/rollback", assetHandler.RollbackBatch)
 		v1.GET("/batch/:id",
 			middleware.HTTPCache(cacheManager, 1*time.Minute, "kor:batch", nil),
 			assetHandler.GetBatchStatus)

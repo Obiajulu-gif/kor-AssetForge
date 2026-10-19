@@ -117,6 +117,7 @@ func InitDB() (*gorm.DB, error) {
 		&models.ComplianceAuditLog{},
 		// Batch transaction model (#106)
 		&models.BatchTransaction{},
+		&models.SearchAnalytics{},
 		// Event indexer models (#180)
 		&models.IndexedEvent{},
 		&models.EventCheckpoint{},

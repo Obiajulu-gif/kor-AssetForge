@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"fmt"
+	"github.com/google/uuid"
 	"net/http"
 	"strconv"
 	"time"
@@ -75,7 +76,10 @@ func (sh *SearchHandler) Search(c *gin.Context) {
 	result.Took = tookMs
 
 	// Record analytics (fire-and-forget).
-	sh.recordAnalytics(req, result.Total, tookMs)
+	event := sh.recordAnalytics(req, result.Total, tookMs)
+	if err := sh.backend.RecordAnalytics(c.Request.Context(), &event); err != nil {
+		Logger.Warn("failed to persist search analytics", zap.Error(err))
+	}
 
 	c.JSON(http.StatusOK, result)
 }
@@ -129,7 +133,7 @@ func (sh *SearchHandler) SearchAnalytics(c *gin.Context) {
 	})
 }
 
-func (sh *SearchHandler) recordAnalytics(req services.SearchRequest, count int64, tookMs float64) {
+func (sh *SearchHandler) recordAnalytics(req services.SearchRequest, count int64, tookMs float64) services.SearchAnalyticsEvent {
 	filters := map[string]interface{}{}
 	if req.AssetType != "" || len(req.AssetTypes) > 0 {
 		filters["asset_type"] = fmt.Sprint(req.AssetTypes)
@@ -157,10 +161,12 @@ func (sh *SearchHandler) recordAnalytics(req services.SearchRequest, count int64
 	}
 
 	evt := services.SearchAnalyticsEvent{
+		EventID:     uuid.NewString(),
 		Query:       req.Query,
 		Filters:     filters,
 		ResultCount: count,
 		TookMs:      tookMs,
+		Timestamp:   time.Now().UTC(),
 	}
 
 	// Keep the last 1000 events in memory.
@@ -168,4 +174,5 @@ func (sh *SearchHandler) recordAnalytics(req services.SearchRequest, count int64
 		sh.analytics = sh.analytics[1:]
 	}
 	sh.analytics = append(sh.analytics, evt)
+	return evt
 }
