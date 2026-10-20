@@ -1,0 +1,167 @@
+name: Performance
+
+# Nightly load/performance suite with regression detection (#300).
+#
+# The suite runs against a real backend + Postgres + Redis, captures the
+# per-scenario metrics emitted by the load tests, and compares them against the
+# committed baselines in backend/tests/performance/baselines.json. A regression
+# fails the job and opens (or updates) a tracking issue.
+
+on:
+  schedule:
+    # 03:00 UTC every day.
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+    inputs:
+      timeout:
+        description: 'go test timeout for the performance suite'
+        required: false
+        default: '30m'
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: performance-nightly
+  cancel-in-progress: false
+
+jobs:
+  performance:
+    name: Performance Regression
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    services:
+      postgres:
+        image: postgres:15
+        ports:
+          - 5432:5432
+        env:
+          POSTGRES_DB: assetforge
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: password
+        options: >-
+          --health-cmd "pg_isready -U postgres -d assetforge" --health-interval 10s --health-timeout 5s --health-retries 5
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 10s --health-timeout 5s --health-retries 5
+
+    env:
+      DATABASE_URL: postgresql://postgres:password@localhost:5432/assetforge?sslmode=disable
+      REDIS_URL: redis://localhost:6379/0
+      JWT_SECRET: nightly-performance-secret
+      SERVER_PORT: '8080'
+      STELLAR_NETWORK: testnet
+      PERF_BASE_URL: http://localhost:8080
+      PERF_OUTPUT_FILE: ${{ github.workspace }}/perf-output.txt
+      PERF_REPORT_FILE: ${{ github.workspace }}/perf-report.md
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - name: Install dependencies
+        working-directory: backend
+        run: go mod download
+
+      - name: Apply database migrations
+        working-directory: backend
+        run: go run ./cmd/migrate up || echo "migrations unavailable; server may auto-migrate"
+
+      - name: Start backend server
+        working-directory: backend
+        run: |
+          go run . > "${GITHUB_WORKSPACE}/server.log" 2>&1 &
+          echo "server_pid=$!" >> "$GITHUB_ENV"
+          for i in $(seq 1 60); do
+            if curl -sf http://localhost:8080/health > /dev/null; then
+              echo "backend is healthy after ${i} attempts"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "backend failed to become healthy" >&2
+          tail -n 100 "${GITHUB_WORKSPACE}/server.log" >&2
+          exit 1
+
+      - name: Run performance suite
+        id: perf
+        working-directory: backend
+        continue-on-error: true
+        run: |
+          go test ./tests/performance/... -v -timeout "${{ github.event.inputs.timeout || '30m' }}" 2>&1 | tee "${PERF_OUTPUT_FILE}"
+
+      - name: Compare against baselines
+        id: compare
+        working-directory: backend
+        continue-on-error: true
+        run: |
+          go test ./tests/performance/... -run TestCompareToBaselines -v
+
+      - name: Publish results to dashboard (job summary)
+        if: always()
+        run: |
+          if [ -f "${PERF_REPORT_FILE}" ]; then
+            cat "${PERF_REPORT_FILE}" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "## Performance run" >> "$GITHUB_STEP_SUMMARY"
+            echo "No comparison report was produced." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload performance artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-results
+          path: |
+            perf-output.txt
+            perf-report.md
+            server.log
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Stop backend server
+        if: always()
+        run: |
+          if [ -n "${{ env.server_pid }}" ]; then
+            kill "${{ env.server_pid }}" 2>/dev/null || true
+          fi
+
+      - name: Open or update regression issue
+        if: steps.compare.outcome == 'failure'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const title = 'Performance regression detected';
+            const marker = '<!-- performance-regression -->';
+            let body = `${marker}\n\nThe nightly performance suite detected a regression on ${new Date().toISOString()}.\n\n`;
+            try {
+              body += fs.readFileSync(process.env.PERF_REPORT_FILE, 'utf8');
+            } catch (e) {
+              body += '_Report file was not produced; see the workflow artifacts._';
+            }
+            const { owner, repo } = context.repo;
+            const existing = await github.rest.issues.listForRepo({
+              owner, repo, state: 'open', labels: 'performance',
+            });
+            const match = existing.data.find((i) => i.title === title);
+            if (match) {
+              await github.rest.issues.createComment({ owner, repo, issue_number: match.number, body });
+            } else {
+              await github.rest.issues.create({ owner, repo, title, body });
+            }
+
+      - name: Fail if regressions were detected
+        if: steps.compare.outcome == 'failure'
+        run: |
+          echo "Performance regressions detected; see the summary." >&2
+          exit 1

@@ -43,10 +43,10 @@ type TransactionVolume struct {
 
 // ActivitySummary is the full dashboard payload returned to the frontend.
 type ActivitySummary struct {
-	Portfolio         PortfolioSummary    `json:"portfolio"`
+	Portfolio         PortfolioSummary      `json:"portfolio"`
 	RecentActivities  []models.UserActivity `json:"recent_activities"`
-	TransactionVolume []TransactionVolume  `json:"transaction_volume_30d"`
-	GeneratedAt       time.Time           `json:"generated_at"`
+	TransactionVolume []TransactionVolume   `json:"transaction_volume_30d"`
+	GeneratedAt       time.Time             `json:"generated_at"`
 }
 
 // GetDashboard returns the full activity dashboard for a user, backed by a 5-minute cache.
@@ -85,8 +85,8 @@ func (s *AnalyticsService) computeDashboard(ctx context.Context, userID uint) (*
 
 	s.db.WithContext(ctx).Model(&models.Transaction{}).
 		Joins("JOIN assets ON assets.id = transactions.asset_id").
-		Where("transactions.from_address = (SELECT stellar_address FROM users WHERE id = ?) OR "+
-			"transactions.to_address = (SELECT stellar_address FROM users WHERE id = ?)", userID, userID).
+		Where(`transactions.from_address = (SELECT stellar_address FROM users WHERE id = ?) OR
+			transactions.to_address = (SELECT stellar_address FROM users WHERE id = ?)`, userID, userID).
 		Count(&portfolio.TotalTransactions)
 
 	type assetTypeCount struct {

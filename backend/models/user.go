@@ -18,9 +18,9 @@ const (
 // User represents a platform user
 type User struct {
 	ID                   uint           `gorm:"primaryKey" json:"id"`
-	StellarAddress       string         `gorm:"uniqueIndex;not null" json:"stellar_address"`
-	Email                string         `gorm:"uniqueIndex" json:"email"`
-	Username             string         `gorm:"uniqueIndex" json:"username"`
+	StellarAddress       string         `gorm:"uniqueIndex:idx_users_stellar_address,where:deleted_at IS NULL;not null" json:"stellar_address"`
+	Email                string         `gorm:"uniqueIndex:idx_users_email,where:deleted_at IS NULL;not null" json:"email"`
+	Username             string         `gorm:"uniqueIndex:idx_users_username,where:deleted_at IS NULL;not null" json:"username"`
 	PasswordHash         string         `gorm:"not null" json:"-"`
 	Role                 UserRole       `gorm:"default:'user'" json:"role"`
 	KYCVerified          bool           `gorm:"default:false" json:"kyc_verified"`
@@ -36,6 +36,8 @@ type User struct {
 	BackupCodes              string         `gorm:"type:text" json:"-"`
 	RecoveryCodesGeneratedAt *time.Time     `json:"-"`
 	LastLoginAt              *time.Time     `json:"last_login_at,omitempty"`
+	FailedLoginAttempts      int            `json:"-"`
+	LockedUntil              *time.Time     `json:"-"`
 	CreatedAt            time.Time      `json:"created_at"`
 	UpdatedAt            time.Time      `json:"updated_at"`
 	DeletedAt            gorm.DeletedAt `gorm:"index" json:"-"`

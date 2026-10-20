@@ -16,14 +16,19 @@ import (
 type SearchHandler struct {
 	backend     services.SearchBackend
 	suggestions *services.SearchSuggestionService
-	mu          sync.RWMutex
 	analytics   []services.SearchAnalyticsEvent // in-memory ring; replace with DB or queue in production
+	clicks      map[string]int
+	mu          sync.RWMutex
 }
 
 // NewSearchHandler constructs a SearchHandler. Pass a DBSearchBackend or
 // ESSearchBackend (or any SearchBackend) as the backend.
 func NewSearchHandler(backend services.SearchBackend) *SearchHandler {
-	return &SearchHandler{backend: backend, suggestions: services.NewSearchSuggestionService(backend)}
+	return &SearchHandler{
+		backend:     backend,
+		suggestions: services.NewSearchSuggestionService(backend),
+		clicks:      make(map[string]int),
+	}
 }
 
 // Search handles GET /api/v1/search/assets
@@ -81,8 +86,7 @@ func (sh *SearchHandler) Search(c *gin.Context) {
 	result.Took = tookMs
 
 	// Record analytics (fire-and-forget).
-	sh.recordAnalytics(req, result.Total, tookMs)
-	sh.suggestions.RecordSearch(req.UserID, req.Query)
+	result.AnalyticsEventID = sh.recordAnalytics(req, result.Total, tookMs)
 
 	c.JSON(http.StatusOK, result)
 }
@@ -110,6 +114,7 @@ func (sh *SearchHandler) Suggest(c *gin.Context) {
 	if limit <= 0 || limit > 20 {
 		limit = 10
 	}
+	limit = clampPageLimit(limit)
 
 	result, err := sh.backend.Suggest(c.Request.Context(), query, limit)
 	if err != nil {
@@ -126,6 +131,7 @@ func (sh *SearchHandler) Suggest(c *gin.Context) {
 // searches for immediate display on focus.
 func (sh *SearchHandler) Autocomplete(c *gin.Context) {
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "10"))
+	limit = clampPageLimit(limit)
 	result, err := sh.suggestions.Autocomplete(c.Request.Context(), c.GetUint("user_id"), c.Query("q"), limit)
 	if err != nil {
 		Logger.Error("search autocomplete failed", zap.Error(err))
@@ -170,15 +176,52 @@ func (sh *SearchHandler) Facets(c *gin.Context) {
 func (sh *SearchHandler) SearchAnalytics(c *gin.Context) {
 	sh.mu.RLock()
 	defer sh.mu.RUnlock()
+	zeroResults := 0
+	queryCounts := map[string]int{}
+	clicks := 0
+	for _, event := range sh.analytics {
+		if event.ResultCount == 0 {
+			zeroResults++
+		}
+		queryCounts[event.Query]++
+		clicks += sh.clicks[event.EventID]
+	}
+	clickRate := float64(0)
+	if len(sh.analytics) > 0 {
+		clickRate = float64(clicks) / float64(len(sh.analytics))
+	}
 	c.JSON(http.StatusOK, gin.H{
-		"events": sh.analytics,
-		"total":  len(sh.analytics),
+		"events":               sh.analytics,
+		"total":                len(sh.analytics),
+		"zero_result_searches": zeroResults,
+		"clicks":               clicks,
+		"click_through_rate":   clickRate,
+		"popular_queries":      queryCounts,
 	})
 }
 
-func (sh *SearchHandler) recordAnalytics(req services.SearchRequest, count int64, tookMs float64) {
+// RecordSearchClick attributes a result click to a previously recorded search.
+func (sh *SearchHandler) RecordSearchClick(c *gin.Context) {
+	var req struct {
+		EventID string `json:"event_id" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil || req.EventID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "event_id is required"})
+		return
+	}
 	sh.mu.Lock()
 	defer sh.mu.Unlock()
+	for _, event := range sh.analytics {
+		if event.EventID == req.EventID {
+			sh.clicks[req.EventID]++
+			c.JSON(http.StatusAccepted, gin.H{"event_id": req.EventID, "clicks": sh.clicks[req.EventID]})
+			return
+		}
+	}
+	c.JSON(http.StatusNotFound, gin.H{"error": "search event not found"})
+}
+
+func (sh *SearchHandler) recordAnalytics(req services.SearchRequest, count int64, tookMs float64) string {
 	filters := map[string]interface{}{}
 	if req.AssetType != "" || len(req.AssetTypes) > 0 {
 		filters["asset_type"] = fmt.Sprint(req.AssetTypes)
@@ -212,6 +255,7 @@ func (sh *SearchHandler) recordAnalytics(req services.SearchRequest, count int64
 	}
 
 	evt := services.SearchAnalyticsEvent{
+		EventID:     fmt.Sprintf("search-%d", time.Now().UnixNano()),
 		Query:       req.Query,
 		Filters:     filters,
 		ResultCount: count,
@@ -223,8 +267,11 @@ func (sh *SearchHandler) recordAnalytics(req services.SearchRequest, count int64
 	}
 
 	// Keep the last 1000 events in memory.
+	sh.mu.Lock()
+	defer sh.mu.Unlock()
 	if len(sh.analytics) >= 1000 {
 		sh.analytics = sh.analytics[1:]
 	}
 	sh.analytics = append(sh.analytics, evt)
+	return evt.EventID
 }

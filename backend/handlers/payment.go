@@ -188,6 +188,7 @@ func (h *PaymentHandler) ListPayments(c *gin.Context) {
 
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
+	limit = clampPageLimit(limit)
 
 	payments, total, err := h.gw.ListUserPayments(userID.(uint), page, limit)
 	if err != nil {

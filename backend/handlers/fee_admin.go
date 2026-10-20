@@ -176,7 +176,10 @@ func (h *FeeAdminHandler) DeactivateFeeConfig(c *gin.Context) {
 	var body struct {
 		Reason string `json:"reason"`
 	}
-	_ = c.ShouldBindJSON(&body)
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid fee payload", "details": err.Error()})
+		return
+	}
 
 	if err := h.feeService.DeactivateFeeConfig(id, adminID, body.Reason); err != nil {
 		status := http.StatusInternalServerError
@@ -202,10 +205,7 @@ func (h *FeeAdminHandler) DeactivateFeeConfig(c *gin.Context) {
 func (h *FeeAdminHandler) ListFeeConfigs(c *gin.Context) {
 	feeType := c.Query("fee_type")
 	page := queryIntDefault(c, "page", 1)
-	limit := queryIntDefault(c, "limit", 20)
-	if limit > 100 {
-		limit = 100
-	}
+	limit := clampPageLimit(queryIntDefault(c, "limit", 20))
 
 	configs, total, err := h.feeService.ListFeeConfigs(feeType, page, limit)
 	if err != nil {
@@ -261,7 +261,7 @@ func (h *FeeAdminHandler) GetFeeAuditLog(c *gin.Context) {
 	}
 
 	page := queryIntDefault(c, "page", 1)
-	limit := queryIntDefault(c, "limit", 20)
+	limit := clampPageLimit(queryIntDefault(c, "limit", 20))
 
 	logs, total, err := h.feeService.GetAuditLog(id, page, limit)
 	if err != nil {
@@ -376,3 +376,4 @@ func resolveTime(t *time.Time, fallback time.Time) time.Time {
 	}
 	return fallback
 }
+

@@ -2,6 +2,7 @@ package router
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
 	"time"
@@ -16,6 +17,8 @@ import (
 	"github.com/yourusername/kor-assetforge/handlers"
 	"github.com/yourusername/kor-assetforge/handlers/auth"
 	handlersv2 "github.com/yourusername/kor-assetforge/handlers/v2"
+	versionhandler "github.com/yourusername/kor-assetforge/handlers/version"
+	"github.com/yourusername/kor-assetforge/handlers/webhooks"
 	"github.com/yourusername/kor-assetforge/middleware"
 	"github.com/yourusername/kor-assetforge/models"
 	"github.com/yourusername/kor-assetforge/services"
@@ -26,7 +29,12 @@ import (
 )
 
 // SetupRouter initializes the HTTP router and registers all routes.
+// It panics if mandatory environment configuration is invalid.
 func SetupRouter(db *gorm.DB) *gin.Engine {
+	runtimeConfig, err := config.LoadRuntimeConfig()
+	if err != nil {
+		panic(fmt.Errorf("invalid application configuration: %w", err))
+	}
 	// Initialize Stellar client
 	stellarClient, err := config.InitStellarClient()
 	if err != nil {
@@ -67,17 +75,20 @@ func SetupRouter(db *gorm.DB) *gin.Engine {
 
 	// Setup authentication
 	authConfig := &auth.AuthConfig{
-		JWTSecret:          getEnvOrDefault("JWT_SECRET", "your-super-secret-jwt-key-change-in-production"),
-		JWTExpirationHours: getEnvIntOrDefault("JWT_EXPIRATION_HOURS", 24),
-		RefreshTokenHours:  getEnvIntOrDefault("REFRESH_TOKEN_HOURS", 168),
-		EmailTokenHours:    getEnvIntOrDefault("EMAIL_TOKEN_HOURS", 24),
-		PasswordResetHours: getEnvIntOrDefault("PASSWORD_RESET_HOURS", 1),
-		BcryptCost:         getEnvIntOrDefault("BCRYPT_COST", 12),
+		JWTSecret:            runtimeConfig.JWTSecret,
+		JWTExpirationHours:   getEnvIntOrDefault("JWT_EXPIRATION_HOURS", 24),
+		RefreshTokenHours:    getEnvIntOrDefault("REFRESH_TOKEN_HOURS", 168),
+		EmailTokenHours:      getEnvIntOrDefault("EMAIL_TOKEN_HOURS", 24),
+		PasswordResetMinutes: getEnvIntOrDefault("PASSWORD_RESET_HOURS", 30),
+		BcryptCost:           getEnvIntOrDefault("BCRYPT_COST", 12),
 	}
 	emailService := services.NewEmailServiceFromEnv()
 	authHandler := auth.NewAuthHandler(db, authConfig, emailService)
+	fileUploadHandler := handlers.NewFileUploadHandler()
 	authMiddleware := auth.NewAuthMiddleware(authConfig.JWTSecret)
 	authRateLimiter := auth.NewAuthRateLimiter(rate.Limit(5.0/60.0), 10)
+	registrationConfig := config.LoadRegistrationRateLimitConfig()
+	registrationRateLimiter := auth.NewRegistrationRateLimiter(registrationConfig.MaxPerWindow, registrationConfig.Window)
 
 	// Setup router
 	router := gin.New()
@@ -91,10 +102,12 @@ func SetupRouter(db *gorm.DB) *gin.Engine {
 		handlers.RequestLogger(),
 		handlers.GlobalErrorHandler(),
 		middleware.RequestSizeLimiter(2<<20),
+		middleware.SecurityHeaders(config.LoadSecurityHeadersConfig()),
 		middleware.RequireJSON(),
 		middleware.RateLimit(20, time.Minute),
 		middleware.CSRFProtection(os.Getenv("CSRF_SECRET")),
 		middleware.VersionFromPath(), // attach api_version to every request context (#124)
+		middleware.EnforcePaginationLimits(), // reject oversized page sizes (#302)
 	)
 
 	// Health check handlers
@@ -120,7 +133,7 @@ func SetupRouter(db *gorm.DB) *gin.Engine {
 		authGroup := v1.Group("/auth")
 		authGroup.Use(authRateLimiter.GeneralAuthRateLimit())
 		{
-			authGroup.POST("/register", authRateLimiter.RegisterRateLimit(), authHandler.Register)
+			authGroup.POST("/register", registrationRateLimiter.RegisterRateLimit(), middleware.CaptchaAfter(registrationConfig.CaptchaAfter, registrationConfig.Window), authHandler.Register)
 			authGroup.POST("/login", authRateLimiter.LoginRateLimit(), authHandler.Login)
 			authGroup.POST("/refresh", authHandler.RefreshToken)
 			authGroup.POST("/verify-email", authRateLimiter.EmailVerificationRateLimit(), authHandler.VerifyEmail)
@@ -134,6 +147,7 @@ func SetupRouter(db *gorm.DB) *gin.Engine {
 		{
 			protected.GET("/profile", authHandler.GetProfile)
 			protected.POST("/logout", authHandler.Logout)
+			protected.POST("/upload", fileUploadHandler.Upload)
 
 			// 2FA routes
 			protected.POST("/auth/2fa/setup", authHandler.Setup2FA)
@@ -174,29 +188,36 @@ func SetupRouter(db *gorm.DB) *gin.Engine {
 		v1.POST("/auth/2fa/login", authHandler.LoginWith2FA)
 
 		// Asset routes (with write-through cache invalidation)
-		assetHandler := handlers.NewAssetHandler(db, stellarClient, redisClient, emailService)
+		assetHandler, err := handlers.NewAssetHandler(db, stellarClient, redisClient, emailService, runtimeConfig.AssetTokenContractID)
+		if err != nil {
+			panic(err)
+		}
 		v1.POST("/assets/tokenize",
 			middleware.InvalidateOnWrite(cacheManager, "kor:asset:*"),
+			middleware.InvalidateOnWriteTags(cacheManager, "asset"),
 			assetHandler.TokenizeAsset)
 		v1.POST("/assets",
 			middleware.InvalidateOnWrite(cacheManager, "kor:asset:*"),
+			middleware.InvalidateOnWriteTags(cacheManager, "asset"),
 			assetHandler.TokenizeAsset)
 		v1.GET("/assets",
-			middleware.HTTPCache(cacheManager, 5*time.Minute, "kor:asset", nil),
+			middleware.HTTPCache(cacheManager, 5*time.Minute, "kor:asset", nil, "asset"),
 			assetHandler.ListAssets)
 		v1.GET("/assets/:id",
-			middleware.HTTPCache(cacheManager, 5*time.Minute, "kor:asset", nil),
+			middleware.HTTPCache(cacheManager, 5*time.Minute, "kor:asset", nil, "asset"),
 			assetHandler.GetAsset)
 
 		// NFT Metadata routes
 		v1.POST("/assets/metadata",
 			middleware.InvalidateOnWrite(cacheManager, "kor:asset:*"),
+			middleware.InvalidateOnWriteTags(cacheManager, "asset"),
 			assetHandler.UpdateMetadata)
 		v1.GET("/assets/:id/metadata",
-			middleware.HTTPCache(cacheManager, 5*time.Minute, "kor:asset", nil),
+			middleware.HTTPCache(cacheManager, 5*time.Minute, "kor:asset", nil, "asset"),
 			assetHandler.GetMetadata)
 		v1.POST("/assets/metadata/immutable",
 			middleware.InvalidateOnWrite(cacheManager, "kor:asset:*"),
+			middleware.InvalidateOnWriteTags(cacheManager, "asset"),
 			assetHandler.MakeMetadataImmutable)
 
 		// Oracle price feed routes
@@ -207,22 +228,40 @@ func SetupRouter(db *gorm.DB) *gin.Engine {
 			middleware.HTTPCache(cacheManager, 1*time.Minute, "kor:oracle", nil),
 			assetHandler.GetAssetOraclePrice)
 
-		// Batch transaction routes
+		// Batch transaction routes (#106, #367, #370)
+		batchHandler := handlers.NewBatchHandler(db, nil)
 		v1.POST("/batch/execute",
+			middleware.BatchValidator(),
 			middleware.InvalidateOnWrite(cacheManager, "kor:asset:*"),
+			middleware.InvalidateOnWriteTags(cacheManager, "asset"),
 			assetHandler.ExecuteBatch)
+		v1.POST("/batch/submit",
+			middleware.BatchValidator(),
+			authMiddleware.JWTAuth(),
+			batchHandler.SubmitBatch)
+		v1.POST("/batch/retry/:id",
+			authMiddleware.JWTAuth(),
+			batchHandler.RetryBatch)
+		v1.POST("/batch/:id/retry",
+			authMiddleware.JWTAuth(),
+			batchHandler.RetryBatch)
 		v1.GET("/batch/:id",
 			middleware.HTTPCache(cacheManager, 1*time.Minute, "kor:batch", nil),
 			assetHandler.GetBatchStatus)
+		v1.POST("/batch/:id/rollback",
+			middleware.InvalidateOnWrite(cacheManager, "kor:asset:*"),
+			assetHandler.RollbackBatch)
 		v1.GET("/batches",
 			assetHandler.ListBatchTransactions)
 
 		// Marketplace routes
 		v1.POST("/marketplace/list",
 			middleware.InvalidateOnWrite(cacheManager, "kor:asset:*"),
+			middleware.InvalidateOnWriteTags(cacheManager, "asset"),
 			assetHandler.ListAssetForSale)
 		v1.POST("/marketplace/transfer",
 			middleware.InvalidateOnWrite(cacheManager, "kor:asset:*"),
+			middleware.InvalidateOnWriteTags(cacheManager, "asset"),
 			assetHandler.TransferAsset)
 		v1.GET("/transactions", assetHandler.ListTransactions)
 
@@ -234,6 +273,7 @@ func SetupRouter(db *gorm.DB) *gin.Engine {
 		v1.GET("/search/autocomplete", searchHandler.Autocomplete)
 		v1.GET("/search/facets", searchHandler.Facets)
 		v1.GET("/search/analytics", searchHandler.SearchAnalytics)
+		v1.POST("/search/analytics/click", searchHandler.RecordSearchClick)
 
 		// KYC / AML routes
 		kycHandler := handlers.NewKYCHandler(db, nil, emailService, nil)
@@ -289,10 +329,19 @@ func SetupRouter(db *gorm.DB) *gin.Engine {
 		v1.GET("/liquidity/positions", liquidityHandler.GetLPPositions)
 		v1.GET("/liquidity/swaps", liquidityHandler.GetSwapHistory)
 
-		// Incoming webhooks
+		// Incoming webhooks (#372)
 		webhookHandler := handlers.NewWebhookHandler(db)
 		router.POST("/webhooks/stellar-events", webhookHandler.HandleStellarEvent)
 		router.POST("/webhooks/kyc", kycHandler.HandleKYCWebhook)
+
+		emailAnalytics := services.NewEmailAnalyticsService(db)
+		emailWebhookHandler := webhooks.NewEmailWebhookHandler(emailAnalytics, emailService.GetHealthChecker())
+		router.POST("/webhooks/email/sendgrid", emailWebhookHandler.HandleSendGrid)
+		router.POST("/webhooks/email/ses", emailWebhookHandler.HandleSES)
+		router.POST("/webhooks/email", emailWebhookHandler.HandleGeneric)
+		router.POST("/webhooks/email/generic", emailWebhookHandler.HandleGeneric)
+		v1.GET("/email/dashboard", emailWebhookHandler.GetDashboard)
+		v1.GET("/email/analytics", emailWebhookHandler.GetAnalytics)
 
 		// Outgoing webhook subscription routes
 		outgoingWebhookHandler := handlers.NewOutgoingWebhookHandler(db)
@@ -363,6 +412,9 @@ func SetupRouter(db *gorm.DB) *gin.Engine {
 		}
 	}
 
+	// API versioning metadata / migration guide (#301)
+	router.GET("/api/version/migration-guide", versionhandler.MigrationGuide)
+
 	// API v2 routes
 	v2 := router.Group("/api/v2")
 	{
@@ -372,7 +424,10 @@ func SetupRouter(db *gorm.DB) *gin.Engine {
 	}
 
 	// WebSocket routes
-	wsHandler := handlers.NewWebSocketHandler()
+	wsHandler := handlers.NewWebSocketHandler(
+		runtimeConfig.JWTSecret,
+		config.LoadWSRateLimitConfig(),
+	)
 	router.GET("/ws", wsHandler.HandleWS)
 	router.GET("/ws/stats", wsHandler.HandleWSStats)
 

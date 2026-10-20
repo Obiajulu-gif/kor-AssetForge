@@ -163,6 +163,7 @@ func (h *ReportHandler) ListHistory(c *gin.Context) {
 		scheduleID = uint(parsed)
 	}
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
+	limit = clampPageLimit(limit)
 	history, err := h.scheduler.ListHistory(currentUserID(c), scheduleID, limit)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch report history"})

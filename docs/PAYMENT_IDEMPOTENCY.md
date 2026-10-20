@@ -88,7 +88,7 @@ without interfering.
 
 | Layer | File | Behaviour |
 |-------|------|-----------|
-| Schema | `backend/migrations/sql/0039_add_payment_idempotency.up.sql` | Adds `payments.idempotency_key` (NOT NULL) and the unique index `idx_payments_user_idempotency_key (user_id, idempotency_key)`. Existing rows are backfilled to `legacy_<id>`. |
+| Schema | `backend/migrations/sql/0042_add_payment_idempotency.up.sql` | Adds `payments.idempotency_key` (NOT NULL) and the unique index `idx_payments_user_idempotency_key (user_id, idempotency_key)`. Existing rows are backfilled to `legacy_<id>`. |
 | Model | `backend/models/payment.go` | `Payment.IdempotencyKey` with the composite unique index. |
 | Service | `backend/services/payment_gateway.go` | `CreateCheckoutSession` requires a key, looks up an active payment, returns it as a replay, or returns `ErrIdempotencyConflict` / `ErrGatewayUnsupported`. Expired keys are tombstoned so they can be reused. |
 | Handler | `backend/handlers/payment.go` | Resolves the key from header/body, maps service errors to `400`/`409`, and sets `idempotent_replay` + `200` vs `201`. |
@@ -119,5 +119,5 @@ database error.
 | `backend/services/payment_gateway.go` | Gateway orchestration and idempotency logic |
 | `backend/models/payment.go` | `Payment` model |
 | `backend/migrations/sql/0035_create_payments.up.sql` | Base payments schema |
-| `backend/migrations/sql/0039_add_payment_idempotency.up.sql` | Idempotency column and index |
+| `backend/migrations/sql/0042_add_payment_idempotency.up.sql` | Idempotency column and index |
 | `docs/MULTI_CURRENCY_SUPPORT.md` | Currency handling for payments |
