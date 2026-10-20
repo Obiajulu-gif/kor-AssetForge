@@ -1,0 +1,23 @@
+[
+  {
+    "id": 1,
+    "stellar_address": "GBBD47IF6LWK7P7MDEVTESTADMIN7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJ",
+    "role": "admin",
+    "email": "admin@assetforge.io",
+    "username": "admin_test"
+  },
+  {
+    "id": 2,
+    "stellar_address": "GBTESTUSER123456789012345678901234567890123456789012345678",
+    "role": "user",
+    "email": "user1@example.com",
+    "username": "trader_one"
+  },
+  {
+    "id": 3,
+    "stellar_address": "GCTESTUSER987654321098765432109876543210987654321098765432",
+    "role": "user",
+    "email": "user2@example.com",
+    "username": "investor_two"
+  }
+]

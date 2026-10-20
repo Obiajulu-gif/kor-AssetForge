@@ -82,11 +82,17 @@ func NewTestSetup(t *testing.T) *TestSetup {
 		TestUsers: []TestUser{},
 		AdminToken: generateTestToken(adminUser.StellarAddress),
 		CleanupFunc: func() {
-			// Cleanup database
+			// Cleanup database tables to prevent cross-test pollution
+			_ = CleanDatabase(db)
 			sqlDB, _ := db.DB()
-			sqlDB.Close()
+			if sqlDB != nil {
+				_ = sqlDB.Close()
+			}
 		},
 	}
+
+	// Clean any previous data in the database before seeding
+	_ = CleanDatabase(db)
 
 	// Seed test data
 	setup.seedTestData(t)
@@ -94,11 +100,16 @@ func NewTestSetup(t *testing.T) *TestSetup {
 	return setup
 }
 
-// Cleanup performs cleanup after tests
+// Cleanup performs database cleanup and connection teardown after tests
 func (ts *TestSetup) Cleanup() {
 	if ts.CleanupFunc != nil {
 		ts.CleanupFunc()
 	}
+}
+
+// Reset clears all data and re-seeds baseline test fixtures
+func (ts *TestSetup) Reset() {
+	_ = ResetDatabase(ts.DB, ts)
 }
 
 // CreateTestUser creates a new test user with Stellar keypair
