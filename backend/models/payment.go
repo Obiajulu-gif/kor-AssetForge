@@ -28,12 +28,18 @@ const (
 // Payment records a fiat-to-token purchase initiated through a payment gateway.
 type Payment struct {
 	ID              uint           `gorm:"primaryKey" json:"id"`
-	UserID          uint           `gorm:"not null;index" json:"user_id"`
+	UserID          uint           `gorm:"not null;uniqueIndex:idx_payments_user_idempotency_key,priority:1" json:"user_id"`
 	User            User           `gorm:"foreignKey:UserID" json:"user,omitempty"`
 	AssetID         uint           `gorm:"not null;index" json:"asset_id"`
 	Asset           Asset          `gorm:"foreignKey:AssetID" json:"asset,omitempty"`
 	Gateway         PaymentGateway `gorm:"not null" json:"gateway"`
 	GatewayPaymentID string        `gorm:"uniqueIndex" json:"gateway_payment_id"`
+	// IdempotencyKey makes payment creation safe to retry: the pair
+	// (UserID, IdempotencyKey) is unique, so a re-sent request with the same
+	// key resolves to the already-created Payment instead of charging twice.
+	// Keys are client-supplied (Idempotency-Key header or request body) and
+	// are honoured for 24 hours, after which they can be reused.
+	IdempotencyKey  string         `gorm:"not null;size:255;uniqueIndex:idx_payments_user_idempotency_key,priority:2" json:"-"`
 	AmountFiat      int64          `gorm:"not null" json:"amount_fiat"`   // in cents
 	Currency        string         `gorm:"not null;default:'USD'" json:"currency"`
 	TokenAmount     int64          `gorm:"not null" json:"token_amount"` // tokens to credit
