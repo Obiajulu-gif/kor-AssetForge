@@ -130,6 +130,7 @@ jobs:
   e2e-frontend:
     name: Frontend E2E
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
@@ -158,8 +159,10 @@ jobs:
           npm run build
 
       - name: Run E2E tests
+        timeout-minutes: 15
         env:
           PORT: 3000
+          CI: 'true'
           NEXT_PUBLIC_API_URL: http://localhost:8080
         run: |
           cd frontend
