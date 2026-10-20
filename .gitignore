@@ -57,5 +57,7 @@ logs/
 # OS
 Thumbs.db
 issue.md
-pr.md
+# Test artifacts
+test-results/
+playwright-report/
 contracts/test_snapshots/
