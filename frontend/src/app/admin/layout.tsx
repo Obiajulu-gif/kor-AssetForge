@@ -1,14 +1,20 @@
-import React from 'react';
+import type { Metadata } from 'next';
+import type { ReactNode } from 'react';
 
-export const metadata = {
-  title: 'Admin Panel - KOR AssetForge',
+// The title is rendered through the root layout's "%s | kor-AssetForge" template.
+export const metadata: Metadata = {
+  title: 'Admin Panel',
   description: 'Platform management and monitoring dashboard',
+  robots: {
+    index: false,
+    follow: false,
+  },
 };
 
 export default function AdminLayout({
   children,
 }: {
-  children: React.ReactNode;
+  children: ReactNode;
 }) {
   return (
     <div className="bg-gray-50">

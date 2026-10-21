@@ -71,3 +71,26 @@ The `scripts/backup_db.sh` script can be used to backup the database before runn
 2. **Apply**: Run `./scripts/migrate.sh up`.
 3. **Verify**: Check application logs and database state.
 4. **Rollback**: If issues occur, run `./scripts/migrate.sh down` to revert the last change.
+
+## Testing Migrations & Rollbacks
+
+All schema migrations must have automated rollback tests verifying:
+- Up and down execution without data corruption or dangling constraints.
+- Foreign key constraint enforcement across rollback cycles.
+- Idempotency when re-applying migrations.
+
+### Running Migration Tests Locally
+You can run the full migration rollback verification suite using:
+```bash
+./scripts/test_migrations.sh
+```
+
+Or run the Go integration tests directly:
+```bash
+cd backend
+SQL_TEST_DATABASE_URL="postgres://postgres:password@localhost:5432/testdb?sslmode=disable" go test -v ./tests/migrations/...
+```
+
+### Continuous Integration (CI)
+CI automatically runs `./scripts/test_migrations.sh` against an ephemeral PostgreSQL service container on every pull request and push to `main`.
+

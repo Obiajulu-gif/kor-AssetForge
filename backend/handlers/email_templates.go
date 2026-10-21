@@ -9,21 +9,24 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/yourusername/kor-assetforge/models"
 	"github.com/yourusername/kor-assetforge/services"
+	"github.com/yourusername/kor-assetforge/utils"
 	"gorm.io/gorm"
 )
 
 // EmailTemplateHandler exposes administrator endpoints for managing customizable,
 // multi-language, versioned email templates with preview and A/B testing (#163).
 type EmailTemplateHandler struct {
-	DB      *gorm.DB
-	Service *services.EmailTemplateService
+	DB         *gorm.DB
+	Service    *services.EmailTemplateService
+	Versioning *services.TemplateVersioningService
 }
 
 // NewEmailTemplateHandler creates an EmailTemplateHandler.
 func NewEmailTemplateHandler(db *gorm.DB) *EmailTemplateHandler {
 	return &EmailTemplateHandler{
-		DB:      db,
-		Service: services.NewEmailTemplateService(db, nil),
+		DB:         db,
+		Service:    services.NewEmailTemplateService(db, nil),
+		Versioning: services.NewTemplateVersioningService(db),
 	}
 }
 
@@ -281,7 +284,7 @@ func (h *EmailTemplateHandler) Preview(c *gin.Context) {
 // CreateVariant adds an A/B testing variant to a template.
 // POST /api/v1/admin/email-templates/:id/variants
 func (h *EmailTemplateHandler) CreateVariant(c *gin.Context) {
-	templateID, err := strconv.ParseUint(c.Param("id"), 10, 32)
+	templateID, err := utils.ParseUintParam(c.Param("id"))
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid template id"})
 		return
@@ -313,7 +316,7 @@ func (h *EmailTemplateHandler) CreateVariant(c *gin.Context) {
 	}
 
 	variant := models.EmailTemplateVariant{
-		TemplateID: uint(templateID),
+		TemplateID: templateID,
 		Name:       req.Name,
 		Subject:    req.Subject,
 		BodyHTML:   req.BodyHTML,
@@ -363,3 +366,62 @@ func (h *EmailTemplateHandler) RenderTemplate(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, gin.H{"success": true, "data": rendered})
 }
+
+// RollbackToVersion restores a template to a previous version snapshot.
+// A new version record is appended so the rollback itself is audited.
+// POST /api/v1/admin/email-templates/:id/versions/:version/rollback
+func (h *EmailTemplateHandler) RollbackToVersion(c *gin.Context) {
+	templateID, err := utils.ParseUintParam(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid template id"})
+		return
+	}
+	targetVersion, err := strconv.Atoi(c.Param("version"))
+	if err != nil || targetVersion < 1 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid version number"})
+		return
+	}
+
+	var req struct {
+		ChangeNote string `json:"change_note"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil && c.Request.ContentLength > 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid template payload", "details": err.Error()})
+		return
+	}
+
+	result, err := h.Versioning.RollbackToVersion(templateID, targetVersion, currentUserID(c), req.ChangeNote)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": result})
+}
+
+// DiffVersions returns a structural diff between two version snapshots.
+// GET /api/v1/admin/email-templates/:id/versions/diff?from=1&to=2
+func (h *EmailTemplateHandler) DiffVersions(c *gin.Context) {
+	templateID, err := utils.ParseUintParam(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid template id"})
+		return
+	}
+	fromVersion, err := strconv.Atoi(c.Query("from"))
+	if err != nil || fromVersion < 1 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "query param 'from' must be a positive integer"})
+		return
+	}
+	toVersion, err := strconv.Atoi(c.Query("to"))
+	if err != nil || toVersion < 1 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "query param 'to' must be a positive integer"})
+		return
+	}
+
+	diff, err := h.Versioning.DiffVersions(templateID, fromVersion, toVersion)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": diff})
+}
+

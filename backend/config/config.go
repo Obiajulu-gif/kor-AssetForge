@@ -4,17 +4,83 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log"
 	"os"
 	"strconv"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/stellar/go/strkey"
 	"github.com/yourusername/kor-assetforge/migrations"
 	"github.com/yourusername/kor-assetforge/models"
 	"github.com/yourusername/kor-assetforge/utils"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )
+
+// RuntimeConfig contains mandatory settings shared by HTTP and WebSocket startup.
+type RuntimeConfig struct {
+	JWTSecret            string
+	AssetTokenContractID string
+}
+
+// LoadRuntimeConfig validates required settings before connecting to services.
+// Secrets are never included in errors or warnings.
+func LoadRuntimeConfig() (RuntimeConfig, error) {
+	cfg := RuntimeConfig{
+		JWTSecret:            os.Getenv("JWT_SECRET"),
+		AssetTokenContractID: os.Getenv("SOROBAN_ASSET_TOKEN_CONTRACT_ID"),
+	}
+	if err := ValidateJWTSecret(cfg.JWTSecret); err != nil {
+		return RuntimeConfig{}, err
+	}
+	if err := ValidateAssetTokenContractID(cfg.AssetTokenContractID); err != nil {
+		return RuntimeConfig{}, err
+	}
+	if weakJWTSecret(cfg.JWTSecret) {
+		log.Print("Warning: JWT_SECRET appears weak; generate a random secret with scripts/generate_jwt_secret.sh")
+	}
+	return cfg, nil
+}
+
+func ValidateJWTSecret(secret string) error {
+	if strings.TrimSpace(secret) == "" {
+		return fmt.Errorf("JWT_SECRET is required; generate one with scripts/generate_jwt_secret.sh")
+	}
+	if utf8.RuneCountInString(secret) < 32 {
+		return fmt.Errorf("JWT_SECRET must contain at least 32 characters")
+	}
+	return nil
+}
+
+func weakJWTSecret(secret string) bool {
+	lower := strings.ToLower(secret)
+	for _, marker := range []string{"secret", "password", "change", "example", "your-"} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	unique := make(map[rune]struct{})
+	for _, char := range secret {
+		unique[char] = struct{}{}
+	}
+	return len(unique) < 8
+}
+
+// ValidateAssetTokenContractID checks the contract type, payload length, canonical
+// encoding and checksum, rather than accepting any string beginning with C.
+func ValidateAssetTokenContractID(contractID string) error {
+	if contractID == "" {
+		return fmt.Errorf("SOROBAN_ASSET_TOKEN_CONTRACT_ID is required; set it to the deployed asset-token contract address")
+	}
+	payload, err := strkey.Decode(strkey.VersionByteContract, contractID)
+	if err != nil || len(payload) != 32 || len(contractID) != 56 || contractID != strings.ToUpper(contractID) {
+		return fmt.Errorf("SOROBAN_ASSET_TOKEN_CONTRACT_ID must be a valid 56-character Stellar contract address (C...) with a valid checksum")
+	}
+	return nil
+}
 
 // DBPoolConfig keeps production pool sizing explicit and environment-driven.
 // Defaults fit a small API instance and should be benchmarked per deployment.
@@ -27,20 +93,105 @@ type DBPoolConfig struct {
 	ConnectWait  time.Duration
 }
 
-func LoadDBPoolConfig() DBPoolConfig {
-	return DBPoolConfig{
-		MaxOpen: envInt("DB_MAX_OPEN_CONNS", 25), MaxIdle: envInt("DB_MAX_IDLE_CONNS", 10),
-		MaxLifetime: envDuration("DB_CONN_MAX_LIFETIME", 30*time.Minute), MaxIdleTime: envDuration("DB_CONN_MAX_IDLE_TIME", 5*time.Minute),
-		ConnectRetry: envInt("DB_CONNECT_RETRIES", 3), ConnectWait: envDuration("DB_CONNECT_RETRY_WAIT", time.Second),
+// Validate checks that connection pool bounds are physically meaningful.
+func (c *DBPoolConfig) Validate() error {
+	if c.MaxOpen <= 0 {
+		return fmt.Errorf("DB_MAX_OPEN_CONNS must be greater than 0, got %d", c.MaxOpen)
 	}
+	if c.MaxIdle < 0 {
+		return fmt.Errorf("DB_MAX_IDLE_CONNS cannot be negative, got %d", c.MaxIdle)
+	}
+	if c.ConnectRetry < 0 {
+		return fmt.Errorf("DB_CONNECT_RETRIES cannot be negative, got %d", c.ConnectRetry)
+	}
+	return nil
+}
+
+// CheckWarnings inspects pool settings for common misconfigurations and logs actionable warnings.
+// It returns the list of generated warning messages.
+func (c *DBPoolConfig) CheckWarnings() []string {
+	var warnings []string
+
+	if c.MaxIdle > c.MaxOpen {
+		msg := fmt.Sprintf("DB_MAX_IDLE_CONNS (%d) exceeds DB_MAX_OPEN_CONNS (%d); capping MaxIdle to MaxOpen", c.MaxIdle, c.MaxOpen)
+		warnings = append(warnings, msg)
+		log.Printf("Warning: %s", msg)
+		c.MaxIdle = c.MaxOpen
+	}
+
+	if c.MaxOpen > 100 {
+		msg := fmt.Sprintf("DB_MAX_OPEN_CONNS (%d) is high; ensure PostgreSQL max_connections is sized to support all application instances", c.MaxOpen)
+		warnings = append(warnings, msg)
+		log.Printf("Warning: %s", msg)
+	}
+
+	if c.MaxOpen < 5 {
+		msg := fmt.Sprintf("DB_MAX_OPEN_CONNS (%d) is very low (< 5); this may lead to connection pool starvation under concurrent load", c.MaxOpen)
+		warnings = append(warnings, msg)
+		log.Printf("Warning: %s", msg)
+	}
+
+	if c.MaxLifetime == 0 {
+		msg := "DB_CONN_MAX_LIFETIME is 0 (unlimited); connections will never be recycled, which can cause issues with load balancers or database failover"
+		warnings = append(warnings, msg)
+		log.Printf("Warning: %s", msg)
+	}
+
+	if c.MaxLifetime > 0 && c.MaxIdleTime > c.MaxLifetime {
+		msg := fmt.Sprintf("DB_CONN_MAX_IDLE_TIME (%v) is greater than DB_CONN_MAX_LIFETIME (%v); idle connections will be recycled by max lifetime first", c.MaxIdleTime, c.MaxLifetime)
+		warnings = append(warnings, msg)
+		log.Printf("Warning: %s", msg)
+	}
+
+	return warnings
+}
+
+func LoadDBPoolConfig() DBPoolConfig {
+	cfg := DBPoolConfig{
+		MaxOpen:      envInt("DB_MAX_OPEN_CONNS", 25),
+		MaxIdle:      envInt("DB_MAX_IDLE_CONNS", 10),
+		MaxLifetime:  envDuration("DB_CONN_MAX_LIFETIME", 30*time.Minute),
+		MaxIdleTime:  envDuration("DB_CONN_MAX_IDLE_TIME", 5*time.Minute),
+		ConnectRetry: envInt("DB_CONNECT_RETRIES", 3),
+		ConnectWait:  envDuration("DB_CONNECT_RETRY_WAIT", time.Second),
+	}
+
+	if err := cfg.Validate(); err != nil {
+		log.Printf("Warning: invalid database pool configuration: %v; applying safe defaults", err)
+		if cfg.MaxOpen <= 0 {
+			cfg.MaxOpen = 25
+		}
+		if cfg.MaxIdle < 0 {
+			cfg.MaxIdle = 10
+		}
+		if cfg.ConnectRetry < 0 {
+			cfg.ConnectRetry = 3
+		}
+	}
+
+	cfg.CheckWarnings()
+	return cfg
+}
+
+// CacheLockWaitTimeout returns how long a request should wait on another
+// instance's distributed cache-regeneration lock (see utils.CacheManager.
+// GetOrLoadDistributed) before falling back to a stale value or a miss.
+// Configurable via the CACHE_LOCK_WAIT_TIMEOUT environment variable.
+func CacheLockWaitTimeout() time.Duration {
+	return envDuration("CACHE_LOCK_WAIT_TIMEOUT", 2*time.Second)
 }
 
 func (c DBPoolConfig) apply(db *sql.DB) {
-	db.SetMaxOpenConns(c.MaxOpen)
-	db.SetMaxIdleConns(c.MaxIdle)
+	if c.MaxOpen > 0 {
+		db.SetMaxOpenConns(c.MaxOpen)
+	}
+	if c.MaxIdle >= 0 {
+		db.SetMaxIdleConns(c.MaxIdle)
+	}
 	db.SetConnMaxLifetime(c.MaxLifetime)
 	db.SetConnMaxIdleTime(c.MaxIdleTime)
 }
+
 
 func envInt(key string, fallback int) int {
 	if value, err := strconv.Atoi(os.Getenv(key)); err == nil && value > 0 {
@@ -53,6 +204,40 @@ func envDuration(key string, fallback time.Duration) time.Duration {
 		return value
 	}
 	return fallback
+}
+func envBool(key string, fallback bool) bool {
+	if val := os.Getenv(key); val != "" {
+		if b, err := strconv.ParseBool(val); err == nil {
+			return b
+		}
+	}
+	return fallback
+}
+
+// CacheConfig holds configuration for L1 in-memory and L2 Redis caching with resilience settings.
+type CacheConfig struct {
+	// L1 in-memory cache configuration (#315)
+	L1MaxEntries   int
+	L1MaxSizeBytes int64
+	L1DefaultTTL   time.Duration
+
+	// Redis resilience & fallback configuration (#313)
+	RedisFallbackEnabled         bool
+	RedisCircuitBreakerThreshold int           // consecutive failures to trip circuit
+	RedisCircuitBreakerTimeout   time.Duration // cool-off before entering half-open
+	RedisHealthCheckInterval     time.Duration
+}
+
+func LoadCacheConfig() CacheConfig {
+	return CacheConfig{
+		L1MaxEntries:                 envInt("CACHE_L1_MAX_ENTRIES", 10000),
+		L1MaxSizeBytes:               int64(envInt("CACHE_L1_MAX_SIZE_MB", 64)) * 1024 * 1024,
+		L1DefaultTTL:                 envDuration("CACHE_L1_DEFAULT_TTL", 5*time.Minute),
+		RedisFallbackEnabled:         envBool("CACHE_REDIS_FALLBACK_ENABLED", true),
+		RedisCircuitBreakerThreshold: envInt("CACHE_REDIS_CB_THRESHOLD", 5),
+		RedisCircuitBreakerTimeout:   envDuration("CACHE_REDIS_CB_TIMEOUT", 30*time.Second),
+		RedisHealthCheckInterval:     envDuration("CACHE_REDIS_HEALTH_INTERVAL", 15*time.Second),
+	}
 }
 
 // InitDB initializes the database connection, runs SQL migrations, then GORM AutoMigrate.
@@ -142,6 +327,10 @@ func InitDB() (*gorm.DB, error) {
 		&models.WatchlistItem{},
 		// User activity model (#161)
 		&models.UserActivity{},
+		// Recommendation history powers personalized search ranking.
+		&models.UserInteraction{},
+		&models.UserPreference{},
+		&models.AssetRecommendation{},
 		// Email template models (#163)
 		&models.EmailTemplate{},
 		&models.EmailTemplateVersion{},
@@ -155,6 +344,9 @@ func InitDB() (*gorm.DB, error) {
 		&models.ReferralCode{},
 		&models.Referral{},
 		&models.ReferralReward{},
+		// Email delivery and tracking models (#372)
+		&models.EmailDelivery{},
+		&models.EmailSuppression{},
 	); err != nil {
 		return nil, fmt.Errorf("failed to auto-migrate models: %w", err)
 	}

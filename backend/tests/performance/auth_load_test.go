@@ -124,7 +124,7 @@ func TestLoad_Auth_Refresh(t *testing.T) {
 func TestLoad_Auth_Register(t *testing.T) {
 	db := openDB(t)
 	t.Cleanup(func() {
-		db.Exec("DELETE FROM users WHERE username LIKE 'perf_reg_%'")
+		db.Exec("DELETE FROM users WHERE username LIKE ?", "perf_reg_%")
 	})
 
 	url := baseURL() + "/api/v1/auth/register"

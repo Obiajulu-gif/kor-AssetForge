@@ -1,0 +1,26 @@
+[
+  {
+    "id": 1,
+    "name": "Manhattan Commercial Plaza",
+    "symbol": "MCP01",
+    "description": "Prime commercial real estate tokenized on Stellar",
+    "total_supply": 1000000,
+    "fractions": 7,
+    "contract_id": "CA3D5KRYMCMV244BH7AVWNDCZWYCXNOKZRI2UMQIO2GTJ36K6IZ5MCPO",
+    "owner_address": "GBBD47IF6LWK7P7MDEVTESTADMIN7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJ",
+    "verified": true,
+    "asset_type": "real_estate"
+  },
+  {
+    "id": 2,
+    "name": "Solar Energy Array Austin",
+    "symbol": "SOLAR",
+    "description": "5MW Solar generation facility revenue-share token",
+    "total_supply": 500000,
+    "fractions": 7,
+    "contract_id": "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HH4SOLA",
+    "owner_address": "GBBD47IF6LWK7P7MDEVTESTADMIN7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJ",
+    "verified": true,
+    "asset_type": "energy"
+  }
+]

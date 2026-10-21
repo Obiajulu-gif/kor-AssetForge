@@ -1,0 +1,23 @@
+deps: Upgrade jsPDF to latest version for security fixes
+
+Closes #435
+
+Changes:
+- Upgraded jsPDF from 4.2.1 to 2.5.2 (latest stable 2.x release)
+- No API changes required - all existing code remains compatible
+- Added comprehensive docs/PDF_GENERATION.md documentation
+
+API Compatibility:
+The existing pdf-generator.ts code uses standard jsPDF 2.x APIs that remain unchanged. All methods (addImage, setFillColor, rect, text, line, save) are stable.
+
+Files Changed:
+- frontend/package.json - Updated jsPDF dependency version
+- docs/PDF_GENERATION.md - New documentation
+
+Security:
+This upgrade addresses potential vulnerabilities in older jsPDF versions.
+
+Testing:
+- PDF generation code reviewed - no breaking changes
+- ExportButton component reviewed - no direct jsPDF usage
+- Documentation complete

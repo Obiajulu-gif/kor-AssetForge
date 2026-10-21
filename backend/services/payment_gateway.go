@@ -13,11 +13,34 @@ import (
 // ErrGatewayUnsupported is returned when an unknown gateway is requested.
 var ErrGatewayUnsupported = errors.New("unsupported payment gateway")
 
+// ErrIdempotencyKeyRequired is returned when a payment is attempted without an
+// idempotency key.
+var ErrIdempotencyKeyRequired = errors.New("idempotency key is required")
+
+// ErrIdempotencyConflict is returned when an idempotency key that is still
+// within its TTL is reused with different payment parameters (asset, amount,
+// currency or gateway). The original request must be retried unchanged or a
+// new key must be supplied.
+var ErrIdempotencyConflict = errors.New("idempotency key already used with different payment parameters")
+
+// IdempotencyKeyTTL is how long a client-supplied idempotency key is honoured.
+// Requests retried with the same key within this window resolve to the original
+// payment instead of creating a duplicate charge. After the TTL the key is
+// released and may be reused.
+const IdempotencyKeyTTL = 24 * time.Hour
+
+// checkoutSessionTTL is how long a generated checkout URL is considered valid;
+// it is also used to report ExpiresAt on idempotent replays.
+const checkoutSessionTTL = 30 * time.Minute
+
 // GatewayCheckoutSession holds the data needed to redirect a user to the gateway.
 type GatewayCheckoutSession struct {
 	GatewayPaymentID string `json:"gateway_payment_id"`
 	CheckoutURL      string `json:"checkout_url"`
 	ExpiresAt        int64  `json:"expires_at"`
+	// IdempotentReplay is true when this session was reconstructed from a
+	// previously created payment rather than a fresh gateway request.
+	IdempotentReplay bool `json:"idempotent_replay"`
 }
 
 // PaymentGatewayService orchestrates fiat payment processing via Stripe and PayPal.
@@ -40,25 +63,51 @@ func NewPaymentGatewayService(db *gorm.DB) *PaymentGatewayService {
 
 // CreateCheckoutSession creates a payment intent / order at the chosen gateway and
 // stores a pending Payment record. The caller should redirect the user to CheckoutURL.
-func (s *PaymentGatewayService) CreateCheckoutSession(userID, assetID uint, amountFiat int64, currency string, gateway models.PaymentGateway) (*GatewayCheckoutSession, *models.Payment, error) {
-	var gatewayPaymentID, checkoutURL string
+//
+// idempotencyKey is required and must be unique per user. If a payment was
+// already created with the same key within IdempotencyKeyTTL, the original
+// session is returned with IdempotentReplay set to true and no new gateway
+// charge is created. Reusing a live key with different payment parameters
+// returns ErrIdempotencyConflict.
+func (s *PaymentGatewayService) CreateCheckoutSession(userID, assetID uint, amountFiat int64, currency string, gateway models.PaymentGateway, idempotencyKey string) (*GatewayCheckoutSession, *models.Payment, error) {
+	if idempotencyKey == "" {
+		return nil, nil, ErrIdempotencyKeyRequired
+	}
 
+	existing, err := s.findActivePaymentByIdempotencyKey(userID, idempotencyKey)
+	if err != nil {
+		return nil, nil, err
+	}
+	if existing != nil {
+		if existing.AssetID != assetID || existing.AmountFiat != amountFiat ||
+			existing.Currency != currency || existing.Gateway != gateway {
+			return nil, nil, ErrIdempotencyConflict
+		}
+		return &GatewayCheckoutSession{
+			GatewayPaymentID: existing.GatewayPaymentID,
+			CheckoutURL:      checkoutURLFor(existing.Gateway, existing.GatewayPaymentID),
+			ExpiresAt:        existing.CreatedAt.Add(checkoutSessionTTL).Unix(),
+			IdempotentReplay: true,
+		}, existing, nil
+	}
+
+	var gatewayPaymentID, checkoutURL string
 	switch gateway {
 	case models.GatewayStripe:
 		gatewayPaymentID = fmt.Sprintf("pi_stripe_%d_%d_%d", userID, assetID, time.Now().UnixMilli())
-		checkoutURL = "https://checkout.stripe.com/pay/" + gatewayPaymentID
 	case models.GatewayPayPal:
 		gatewayPaymentID = fmt.Sprintf("pp_order_%d_%d_%d", userID, assetID, time.Now().UnixMilli())
-		checkoutURL = "https://www.paypal.com/checkoutnow?token=" + gatewayPaymentID
 	default:
 		return nil, nil, ErrGatewayUnsupported
 	}
+	checkoutURL = checkoutURLFor(gateway, gatewayPaymentID)
 
 	payment := &models.Payment{
 		UserID:           userID,
 		AssetID:          assetID,
 		Gateway:          gateway,
 		GatewayPaymentID: gatewayPaymentID,
+		IdempotencyKey:   idempotencyKey,
 		AmountFiat:       amountFiat,
 		Currency:         currency,
 		TokenAmount:      amountFiat / 100, // 1 token per dollar (simplified)
@@ -66,14 +115,68 @@ func (s *PaymentGatewayService) CreateCheckoutSession(userID, assetID uint, amou
 	}
 
 	if err := s.db.Create(payment).Error; err != nil {
+		// A concurrent request may have created the payment with the same key.
+		// Re-read it and treat the request as an idempotent replay.
+		if raced, findErr := s.findActivePaymentByIdempotencyKey(userID, idempotencyKey); findErr == nil && raced != nil {
+			return &GatewayCheckoutSession{
+				GatewayPaymentID: raced.GatewayPaymentID,
+				CheckoutURL:      checkoutURLFor(raced.Gateway, raced.GatewayPaymentID),
+				ExpiresAt:        raced.CreatedAt.Add(checkoutSessionTTL).Unix(),
+				IdempotentReplay: true,
+			}, raced, nil
+		}
 		return nil, nil, fmt.Errorf("failed to persist payment record: %w", err)
 	}
 
 	return &GatewayCheckoutSession{
 		GatewayPaymentID: gatewayPaymentID,
 		CheckoutURL:      checkoutURL,
-		ExpiresAt:        time.Now().Add(30 * time.Minute).Unix(),
+		ExpiresAt:        time.Now().Add(checkoutSessionTTL).Unix(),
+		IdempotentReplay: false,
 	}, payment, nil
+}
+
+// findActivePaymentByIdempotencyKey returns the payment created with the given
+// key by the user within IdempotencyKeyTTL. Payments older than the TTL are
+// "released" (their stored key is tombstoned) and nil is returned so the key can
+// be legitimately reused without violating the unique index.
+func (s *PaymentGatewayService) findActivePaymentByIdempotencyKey(userID uint, idempotencyKey string) (*models.Payment, error) {
+	var payment models.Payment
+	err := s.db.Where("user_id = ? AND idempotency_key = ?", userID, idempotencyKey).First(&payment).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	if time.Since(payment.CreatedAt) > IdempotencyKeyTTL {
+		tombstone := fmt.Sprintf("__expired__%d_%d", payment.ID, time.Now().UnixNano())
+		if err := s.db.Model(&payment).Update("idempotency_key", tombstone).Error; err != nil {
+			return nil, err
+		}
+		return nil, nil
+	}
+
+	return &payment, nil
+}
+
+// GetPaymentByIdempotencyKey returns the payment previously created with the
+// given key, if it is still within its TTL and belongs to the user.
+func (s *PaymentGatewayService) GetPaymentByIdempotencyKey(userID uint, idempotencyKey string) (*models.Payment, error) {
+	return s.findActivePaymentByIdempotencyKey(userID, idempotencyKey)
+}
+
+// checkoutURLFor reconstructs the redirect URL for a gateway payment identifier.
+func checkoutURLFor(gateway models.PaymentGateway, gatewayPaymentID string) string {
+	switch gateway {
+	case models.GatewayStripe:
+		return "https://checkout.stripe.com/pay/" + gatewayPaymentID
+	case models.GatewayPayPal:
+		return "https://www.paypal.com/checkoutnow?token=" + gatewayPaymentID
+	default:
+		return ""
+	}
 }
 
 // HandleWebhook processes an inbound gateway webhook, updates the payment status,

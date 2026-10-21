@@ -74,9 +74,9 @@ func (s *ValuationTrackerService) GetTrend(assetID uint, from, to time.Time, gra
 	}
 
 	var rows []models.ValuationTrend
-	err := s.db.Raw(fmt.Sprintf(`
+	err := s.db.Raw(`
 		SELECT
-			DATE_TRUNC('%s', recorded_at)::date::text AS date,
+			DATE_TRUNC(CAST(? AS text), recorded_at)::date::text AS date,
 			AVG(valuation_usd)                         AS avg_valuation,
 			MIN(valuation_usd)                         AS min_valuation,
 			MAX(valuation_usd)                         AS max_valuation,
@@ -85,7 +85,7 @@ func (s *ValuationTrackerService) GetTrend(assetID uint, from, to time.Time, gra
 		WHERE asset_id = ? AND recorded_at BETWEEN ? AND ? AND deleted_at IS NULL
 		GROUP BY 1
 		ORDER BY 1 ASC
-	`, truncExpr), assetID, from, to).Scan(&rows).Error
+	`, truncExpr, assetID, from, to).Scan(&rows).Error
 
 	return rows, err
 }

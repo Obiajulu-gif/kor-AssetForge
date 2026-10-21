@@ -2,6 +2,7 @@ package auth
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +15,7 @@ import (
 	"github.com/stretchr/testify/suite"
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/driver/postgres"
+	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 
 	"github.com/yourusername/kor-assetforge/models"
@@ -21,16 +23,31 @@ import (
 
 func openTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
-	dsn := os.Getenv("DATABASE_URL")
+	dsn := os.Getenv("SQL_TEST_DATABASE_URL")
 	if dsn == "" {
-		dsn = "host=localhost user=postgres password=password dbname=assetforge_test port=5432 sslmode=disable"
+		dsn = os.Getenv("DATABASE_URL")
 	}
-	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
+	if dsn != "" {
+		if db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{}); err == nil {
+			if sqlDB, err := db.DB(); err == nil {
+				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+				err := sqlDB.PingContext(ctx)
+				cancel()
+				if err == nil {
+					return db
+				}
+			}
+		}
+	}
+	// Fall back to in-memory SQLite when PostgreSQL is unavailable locally
+	db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{})
 	if err != nil {
 		t.Skipf("test database not available: %v", err)
 	}
 	return db
 }
+
+
 
 type AuthTestSuite struct {
 	suite.Suite
@@ -52,7 +69,7 @@ func (suite *AuthTestSuite) SetupSuite() {
 		JWTExpirationHours: 24,
 		RefreshTokenHours:  168,
 		EmailTokenHours:    24,
-		PasswordResetHours: 1,
+		PasswordResetMinutes: 30,
 		BcryptCost:         4,
 	}
 
@@ -77,7 +94,9 @@ func (suite *AuthTestSuite) SetupSuite() {
 	{
 		protected.GET("/profile", handler.GetProfile)
 		protected.POST("/logout", handler.Logout)
+		protected.DELETE("/auth/account", handler.DeleteAccount)
 	}
+
 
 	suite.db = db
 	suite.handler = handler
@@ -263,6 +282,108 @@ func (suite *AuthTestSuite) TestResetPassword() {
 	assert.NoError(suite.T(), bcrypt.CompareHashAndPassword([]byte(updated.PasswordHash), []byte("newpassword123")))
 }
 
+func (suite *AuthTestSuite) TestAccountRecreationAfterSoftDelete() {
+	email := "recreate@example.com"
+	username := "recreateuser"
+	stellarAddr := "GCRECREATE7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7UJVSGZ"
+
+	// 1. Initial registration succeeds
+	w := httptest.NewRecorder()
+	suite.router.ServeHTTP(w, suite.newRequest("POST", "/api/v1/auth/register", RegisterRequest{
+		StellarAddress: stellarAddr,
+		Email:          email,
+		Username:       username,
+		Password:       "InitialPassword123",
+	}))
+	assert.Equal(suite.T(), http.StatusCreated, w.Code)
+
+	var origUser models.User
+	err := suite.db.Where("email = ?", email).First(&origUser).Error
+	assert.NoError(suite.T(), err)
+	origID := origUser.ID
+
+	// 2. Duplicate registration while user is active fails with 409 Conflict
+	wDup := httptest.NewRecorder()
+	suite.router.ServeHTTP(wDup, suite.newRequest("POST", "/api/v1/auth/register", RegisterRequest{
+		StellarAddress: stellarAddr,
+		Email:          email,
+		Username:       username,
+		Password:       "AnotherPassword123",
+	}))
+	assert.Equal(suite.T(), http.StatusConflict, wDup.Code)
+
+	// 3. User is soft-deleted
+	err = suite.db.Where("id = ?", origID).Delete(&models.User{}).Error
+	assert.NoError(suite.T(), err)
+
+	// Verify user is not found in standard query, but present in Unscoped query
+	var notFound models.User
+	assert.Error(suite.T(), suite.db.Where("id = ?", origID).First(&notFound).Error)
+	var softDeleted models.User
+	assert.NoError(suite.T(), suite.db.Unscoped().Where("id = ?", origID).First(&softDeleted).Error)
+	assert.NotNil(suite.T(), softDeleted.DeletedAt)
+
+	// 4. Re-registration with the same email, username, and StellarAddress succeeds (#310)
+	wRecreate := httptest.NewRecorder()
+	suite.router.ServeHTTP(wRecreate, suite.newRequest("POST", "/api/v1/auth/register", RegisterRequest{
+		StellarAddress: stellarAddr,
+		Email:          email,
+		Username:       username,
+		Password:       "NewSecretPassword123",
+	}))
+	assert.Equal(suite.T(), http.StatusCreated, wRecreate.Code)
+
+	// 5. Verify the newly recreated active user has a new ID
+	var newUser models.User
+	err = suite.db.Where("email = ?", email).First(&newUser).Error
+	assert.NoError(suite.T(), err)
+	assert.NotEqual(suite.T(), origID, newUser.ID)
+	assert.Equal(suite.T(), email, newUser.Email)
+	assert.Equal(suite.T(), username, newUser.Username)
+	assert.Equal(suite.T(), stellarAddr, newUser.StellarAddress)
+
+	// 6. Clean up
+	suite.db.Unscoped().Where("email = ?", email).Delete(&models.User{})
+}
+
+func (suite *AuthTestSuite) TestDeleteAccountEndpoint() {
+	hashed, _ := bcrypt.GenerateFromPassword([]byte("password123"), suite.config.BcryptCost)
+	user := models.User{
+		StellarAddress: "GCDELETEACCT7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7U12",
+		Email:          "deleteaccount@example.com",
+		Username:       "deleteaccountuser",
+		PasswordHash:   string(hashed),
+		EmailVerified:  true,
+	}
+	suite.db.Create(&user)
+
+	token, _, err := suite.handler.generateTokens(&user)
+	assert.NoError(suite.T(), err)
+
+	// Call DELETE /api/v1/auth/account
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("DELETE", "/api/v1/auth/account", nil)
+	r.Header.Set("Authorization", "Bearer "+token)
+	suite.router.ServeHTTP(w, r)
+	assert.Equal(suite.T(), http.StatusOK, w.Code)
+
+	// Verify user is soft-deleted
+	var active models.User
+	assert.Error(suite.T(), suite.db.Where("id = ?", user.ID).First(&active).Error)
+
+	// Verify login no longer works for soft-deleted account
+	wLogin := httptest.NewRecorder()
+	suite.router.ServeHTTP(wLogin, suite.newRequest("POST", "/api/v1/auth/login", LoginRequest{
+		Email:    "deleteaccount@example.com",
+		Password: "password123",
+	}))
+	assert.Equal(suite.T(), http.StatusUnauthorized, wLogin.Code)
+
+	// Clean up
+	suite.db.Unscoped().Where("email = ?", "deleteaccount@example.com").Delete(&models.User{})
+}
+
 func TestAuthTestSuite(t *testing.T) {
 	suite.Run(t, new(AuthTestSuite))
 }
+

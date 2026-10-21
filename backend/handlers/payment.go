@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strconv"
@@ -30,22 +31,60 @@ type createPaymentRequest struct {
 	AmountFiat int64  `json:"amount_fiat" binding:"required,gt=0"` // in cents
 	Currency   string `json:"currency" binding:"omitempty,len=3"`
 	Gateway    string `json:"gateway" binding:"required,oneof=stripe paypal"`
+	// IdempotencyKey may be supplied in the body as an alternative to the
+	// Idempotency-Key header. At least one of the two is required.
+	IdempotencyKey string `json:"idempotency_key" binding:"omitempty,min=8,max=255"`
+}
+
+// idempotencyKeyHeaders lists the accepted header names, in priority order.
+var idempotencyKeyHeaders = []string{"Idempotency-Key", "X-Idempotency-Key"}
+
+// resolveIdempotencyKey returns the idempotency key supplied via header or body.
+// Headers take precedence over the request body.
+func resolveIdempotencyKey(c *gin.Context, bodyKey string) string {
+	for _, header := range idempotencyKeyHeaders {
+		if v := strings.TrimSpace(c.GetHeader(header)); v != "" {
+			return v
+		}
+	}
+	return strings.TrimSpace(bodyKey)
 }
 
 // CreatePayment initiates a fiat purchase via the chosen gateway.
+//
+// The request must carry an idempotency key, either in the Idempotency-Key
+// header or the idempotency_key body field. Retrying a request with the same
+// key within 24 hours returns the original payment (HTTP 200 with
+// idempotent_replay=true) instead of creating a duplicate charge. Reusing a
+// live key with different parameters returns HTTP 409.
 // @Summary Initiate fiat payment
 // @Description Start a fiat-to-token purchase through Stripe or PayPal
 // @Tags payments
 // @Accept json
 // @Produce json
+// @Param Idempotency-Key header string false "Idempotency key (alternative to body field)"
 // @Param body body createPaymentRequest true "Payment details"
 // @Success 201 {object} gin.H
+// @Success 200 {object} gin.H "Idempotent replay of a previous payment"
 // @Failure 400 {object} apperrors.ErrorResponse
+// @Failure 409 {object} apperrors.ErrorResponse "Idempotency key reused with different parameters"
 // @Router /payments [post]
 func (h *PaymentHandler) CreatePayment(c *gin.Context) {
 	var req createPaymentRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		apperrors.AbortWithError(c, apperrors.NewValidationError("Invalid payment request", err))
+		return
+	}
+
+	idempotencyKey := resolveIdempotencyKey(c, req.IdempotencyKey)
+	if idempotencyKey == "" {
+		apperrors.AbortWithError(c, apperrors.NewBadRequestError(
+			"An idempotency key is required: supply the Idempotency-Key header or the idempotency_key body field"))
+		return
+	}
+	if len(idempotencyKey) < 8 || len(idempotencyKey) > 255 {
+		apperrors.AbortWithError(c, apperrors.NewBadRequestError(
+			"Idempotency key must be between 8 and 255 characters"))
 		return
 	}
 
@@ -66,18 +105,36 @@ func (h *PaymentHandler) CreatePayment(c *gin.Context) {
 		req.AmountFiat,
 		req.Currency,
 		models.PaymentGateway(req.Gateway),
+		idempotencyKey,
 	)
 	if err != nil {
-		apperrors.AbortWithError(c, apperrors.NewInternalError("Failed to create payment session: "+err.Error()))
+		switch {
+		case errors.Is(err, services.ErrIdempotencyConflict):
+			apperrors.AbortWithError(c, apperrors.NewConflictError(
+				"Idempotency key was already used with different payment parameters"))
+		case errors.Is(err, services.ErrIdempotencyKeyRequired):
+			apperrors.AbortWithError(c, apperrors.NewBadRequestError("An idempotency key is required"))
+		case errors.Is(err, services.ErrGatewayUnsupported):
+			apperrors.AbortWithError(c, apperrors.NewBadRequestError("Unsupported payment gateway"))
+		default:
+			apperrors.AbortWithError(c, apperrors.NewInternalError("Failed to create payment session: "+err.Error()))
+		}
 		return
 	}
 
-	c.JSON(http.StatusCreated, gin.H{
+	status := http.StatusCreated
+	if session.IdempotentReplay {
+		status = http.StatusOK
+	}
+
+	c.JSON(status, gin.H{
 		"payment_id":         payment.ID,
 		"gateway_payment_id": session.GatewayPaymentID,
 		"checkout_url":       session.CheckoutURL,
 		"expires_at":         session.ExpiresAt,
 		"status":             payment.Status,
+		"idempotency_key":    idempotencyKey,
+		"idempotent_replay":  session.IdempotentReplay,
 	})
 }
 
@@ -131,6 +188,7 @@ func (h *PaymentHandler) ListPayments(c *gin.Context) {
 
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
+	limit = clampPageLimit(limit)
 
 	payments, total, err := h.gw.ListUserPayments(userID.(uint), page, limit)
 	if err != nil {

@@ -14,6 +14,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
 	"github.com/yourusername/kor-assetforge/apperrors"
+	"github.com/yourusername/kor-assetforge/config"
 	"github.com/yourusername/kor-assetforge/middleware"
 	"github.com/yourusername/kor-assetforge/models"
 	"github.com/yourusername/kor-assetforge/services"
@@ -22,27 +23,38 @@ import (
 	"gorm.io/gorm"
 )
 
-type AssetHandler struct {
-	db              *gorm.DB
-	stellarClient   *utils.StellarClient
-	redisClient     *redis.Client
-	emailService    services.EmailService
-	workflow        *services.WorkflowService
-	metadataService *services.MetadataService
+type contractInvoker interface {
+	InvokeContract(contractID, method string, params []interface{}) (string, error)
 }
 
-func NewAssetHandler(db *gorm.DB, stellarClient *utils.StellarClient, redisClient *redis.Client, emailService services.EmailService, workflow ...*services.WorkflowService) *AssetHandler {
+type AssetHandler struct {
+	db                   *gorm.DB
+	stellarClient        contractInvoker
+	assetTokenContractID string
+	redisClient          *redis.Client
+	emailService         services.EmailService
+	workflow             *services.WorkflowService
+	metadataService      *services.MetadataService
+	transferValidator    *services.TransferValidator
+}
+
+func NewAssetHandler(db *gorm.DB, stellarClient contractInvoker, redisClient *redis.Client, emailService services.EmailService, contractID string, workflow ...*services.WorkflowService) (*AssetHandler, error) {
+	if err := config.ValidateAssetTokenContractID(contractID); err != nil {
+		return nil, err
+	}
 	handler := &AssetHandler{
-		db:              db,
-		stellarClient:   stellarClient,
-		redisClient:     redisClient,
-		emailService:    emailService,
-		metadataService: services.NewMetadataService(db),
+		db:                   db,
+		stellarClient:        stellarClient,
+		assetTokenContractID: contractID,
+		redisClient:          redisClient,
+		emailService:         emailService,
+		metadataService:      services.NewMetadataService(db),
+		transferValidator:    services.NewTransferValidator(db),
 	}
 	if len(workflow) > 0 {
 		handler.workflow = workflow[0]
 	}
-	return handler
+	return handler, nil
 }
 
 // TokenizeAsset handles formal asset tokenization with Soroban integration
@@ -126,9 +138,7 @@ func (h *AssetHandler) TokenizeAsset(c *gin.Context) {
 	}
 
 	params := []interface{}{req.Name, req.Symbol, req.TotalSupply, req.IssuerAccount}
-	contractID := "CXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
-
-	txHash, err := h.stellarClient.InvokeContract(contractID, "mint", params)
+	txHash, err := h.stellarClient.InvokeContract(h.assetTokenContractID, "mint", params)
 	if err != nil {
 		c.JSON(http.StatusAccepted, gin.H{
 			"message": "Asset created in database but contract invocation failed",
@@ -185,10 +195,7 @@ func (h *AssetHandler) ListAssets(c *gin.Context) {
 	if page == 0 {
 		page = 1
 	}
-	limit := query.Limit
-	if limit == 0 {
-		limit = 10
-	}
+	limit := clampPageLimit(query.Limit)
 
 	var assets []models.Asset
 	var total int64
@@ -235,10 +242,7 @@ func (h *AssetHandler) ListTransactions(c *gin.Context) {
 	if page == 0 {
 		page = 1
 	}
-	limit := queryParams.Limit
-	if limit == 0 {
-		limit = 10
-	}
+	limit := clampPageLimit(queryParams.Limit)
 
 	var transactions []models.Transaction
 	var total int64
@@ -343,6 +347,21 @@ func (h *AssetHandler) ListAssetForSale(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Asset not found"})
 		return
 	}
+
+	// A seller not in good compliance standing cannot list, regardless of
+	// who ends up buying (#380).
+	if h.transferValidator != nil {
+		if err := h.transferValidator.ValidateSeller(req.SellerAddr); err != nil {
+			var violation *services.TransferRestrictionViolation
+			if errors.As(err, &violation) {
+				c.JSON(http.StatusForbidden, gin.H{"error": violation.Error()})
+				return
+			}
+			apperrors.AbortWithError(c, apperrors.Wrap(err, apperrors.CodeDatabaseError, "Failed to validate seller", http.StatusInternalServerError))
+			return
+		}
+	}
+
 	listingID := "listing_1"
 	listing := models.Listing{
 		AssetID:      req.AssetID,
@@ -401,6 +420,23 @@ func (h *AssetHandler) TransferAsset(c *gin.Context) {
 		return
 	}
 	c.Set("audit_asset_id", asset.ID)
+
+	// Enforce transfer restrictions before recording anything (#380) --
+	// whitelist/KYC/AML status on both parties, mirroring the on-chain
+	// checks in contracts/src/marketplace.rs. Previously this handler had
+	// no compliance check at all, so a restricted transfer could be
+	// recorded here even if the on-chain submission would later fail.
+	if h.transferValidator != nil {
+		if err := h.transferValidator.ValidateTransfer(req.FromAddress, req.ToAddress, req.AssetID, req.Amount); err != nil {
+			var violation *services.TransferRestrictionViolation
+			if errors.As(err, &violation) {
+				c.JSON(http.StatusForbidden, gin.H{"error": violation.Error()})
+				return
+			}
+			apperrors.AbortWithError(c, apperrors.Wrap(err, apperrors.CodeDatabaseError, "Failed to validate transfer", http.StatusInternalServerError))
+			return
+		}
+	}
 	if h.workflow != nil {
 		if requester, ok := c.Get("user_id"); ok {
 			if userID, ok := requester.(uint); ok {
@@ -586,9 +622,11 @@ func (h *AssetHandler) GetOraclePrice(c *gin.Context) {
 	}
 
 	oracleService := services.NewOraclePriceService()
-	feed, err := oracleService.FetchPrice(symbol)
+	// Strict fetch: rejects stale or unavailable price data instead of serving
+	// a value the contracts would refuse to settle against.
+	feed, err := oracleService.FetchPriceStrict(symbol)
 	if err != nil {
-		apperrors.AbortWithError(c, apperrors.NewExternalServiceError("Failed to fetch price from oracle", err))
+		apperrors.AbortWithError(c, apperrors.NewExternalServiceError("Failed to fetch a fresh price from oracle", err))
 		return
 	}
 
@@ -610,15 +648,15 @@ func (h *AssetHandler) GetAssetOraclePrice(c *gin.Context) {
 	}
 
 	oracleService := services.NewOraclePriceService()
-	feed, err := oracleService.FetchPrice(asset.Symbol)
+	feed, err := oracleService.FetchPriceStrict(asset.Symbol)
 	if err != nil {
-		apperrors.AbortWithError(c, apperrors.NewExternalServiceError("Failed to fetch price from oracle", err))
+		apperrors.AbortWithError(c, apperrors.NewExternalServiceError("Failed to fetch a fresh price from oracle", err))
 		return
 	}
 
 	oracleService.UpdateFeed(asset.ID, feed)
-	staleDuration := 1 * time.Hour
-	isStale := oracleService.IsStale(asset.ID, staleDuration)
+	// Zero means "use the configured threshold" (five minutes by default).
+	isStale := oracleService.IsStale(asset.ID, 0)
 
 	c.JSON(http.StatusOK, gin.H{
 		"asset_id":  asset.ID,
@@ -650,18 +688,21 @@ func (h *AssetHandler) ExecuteBatch(c *gin.Context) {
 		return
 	}
 
-	if len(req.Operations) > 50 {
-		apperrors.AbortWithError(c, apperrors.NewBadRequestError("Batch cannot exceed 50 operations"))
+	maxBatchSize := config.GetMaxBatchSize()
+	if len(req.Operations) > maxBatchSize {
+		apperrors.AbortWithError(c, apperrors.NewBadRequestError(fmt.Sprintf("Batch size limit exceeded: maximum allowed is %d operations (received %d)", maxBatchSize, len(req.Operations))))
 		return
 	}
 
 	operationsJSON, _ := json.Marshal(req.Operations)
 
+	startedAt := time.Now()
 	batch := models.BatchTransaction{
 		UserID:          userID.(uint),
 		Operations:      string(operationsJSON),
-		Status:          "pending",
+		Status:          "processing",
 		TotalOperations: len(req.Operations),
+		StartedAt:       &startedAt,
 	}
 
 	if err := h.db.Create(&batch).Error; err != nil {
@@ -672,6 +713,7 @@ func (h *AssetHandler) ExecuteBatch(c *gin.Context) {
 	var completedOps int
 	var failedOps int
 	var lastError string
+	results := make([]models.BatchOperationResult, 0, len(req.Operations))
 
 	tx := h.db.Begin()
 
@@ -682,6 +724,7 @@ func (h *AssetHandler) ExecuteBatch(c *gin.Context) {
 			if err := tx.First(&asset, op.AssetID).Error; err != nil {
 				failedOps++
 				lastError = fmt.Sprintf("operation %d: asset not found", i)
+				results = append(results, models.BatchOperationResult{Index: i, Type: op.Type, Error: lastError})
 				continue
 			}
 
@@ -696,9 +739,11 @@ func (h *AssetHandler) ExecuteBatch(c *gin.Context) {
 			if err := tx.Create(&transaction).Error; err != nil {
 				failedOps++
 				lastError = fmt.Sprintf("operation %d: %v", i, err)
+				results = append(results, models.BatchOperationResult{Index: i, Type: op.Type, Error: lastError})
 				continue
 			}
 			completedOps++
+			results = append(results, models.BatchOperationResult{Index: i, Type: op.Type, Success: true, TxHash: transaction.TxHash, ResourceID: transaction.TxHash})
 
 		case "list":
 			listing := models.Listing{
@@ -717,9 +762,11 @@ func (h *AssetHandler) ExecuteBatch(c *gin.Context) {
 			if err := tx.Create(&listing).Error; err != nil {
 				failedOps++
 				lastError = fmt.Sprintf("operation %d: %v", i, err)
+				results = append(results, models.BatchOperationResult{Index: i, Type: op.Type, Error: lastError})
 				continue
 			}
 			completedOps++
+			results = append(results, models.BatchOperationResult{Index: i, Type: op.Type, Success: true, ResourceID: listing.ListingID})
 
 		case "cancel_listing":
 			var listingID string
@@ -731,30 +778,74 @@ func (h *AssetHandler) ExecuteBatch(c *gin.Context) {
 			if listingID == "" {
 				failedOps++
 				lastError = fmt.Sprintf("operation %d: listing_id required", i)
+				results = append(results, models.BatchOperationResult{Index: i, Type: op.Type, Error: lastError})
+				continue
+			}
+			var listing models.Listing
+			if err := tx.Where("listing_id = ?", listingID).First(&listing).Error; err != nil {
+				failedOps++
+				lastError = fmt.Sprintf("operation %d: listing not found", i)
+				results = append(results, models.BatchOperationResult{Index: i, Type: op.Type, Error: lastError})
 				continue
 			}
 			if err := tx.Model(&models.Listing{}).Where("listing_id = ?", listingID).Update("active", false).Error; err != nil {
 				failedOps++
 				lastError = fmt.Sprintf("operation %d: %v", i, err)
+				results = append(results, models.BatchOperationResult{Index: i, Type: op.Type, Error: lastError})
 				continue
 			}
 			completedOps++
+			previousActive := listing.Active
+			results = append(results, models.BatchOperationResult{Index: i, Type: op.Type, Success: true, ResourceID: listingID, PreviousActive: &previousActive})
 
 		default:
 			failedOps++
 			lastError = fmt.Sprintf("operation %d: unsupported type %s", i, op.Type)
+			results = append(results, models.BatchOperationResult{Index: i, Type: op.Type, Error: lastError})
 		}
+
+		batch.CompletedCount = completedOps
+		batch.FailedCount = failedOps
+		batch.ProgressPercent = float64(i+1) / float64(batch.TotalOperations) * 100
+		remaining := batch.TotalOperations - i - 1
+		if i >= 0 && remaining > 0 {
+			elapsed := time.Since(startedAt)
+			batch.EstimatedSecondsRemaining = int64(elapsed.Seconds() * float64(remaining) / float64(i+1))
+		}
+		h.db.Model(&batch).Updates(map[string]interface{}{"completed_count": completedOps, "failed_count": failedOps, "progress_percent": batch.ProgressPercent, "estimated_seconds_remaining": batch.EstimatedSecondsRemaining})
+		currentResult := results[len(results)-1]
+		BroadcastEvent(TopicTransactions, EventBatchProgress, gin.H{
+			"batch_id":         batch.ID,
+			"completed":        completedOps,
+			"failed":           failedOps,
+			"total":            batch.TotalOperations,
+			"progress_percent": batch.ProgressPercent,
+			"operation":        currentResult,
+		})
 	}
 
 	batch.CompletedCount = completedOps
 	batch.FailedCount = failedOps
 	batch.ErrorDetails = lastError
+	resultsJSON, _ := json.Marshal(results)
+	batch.OperationResults = string(resultsJSON)
+	finishedAt := time.Now()
+	batch.FinishedAt = &finishedAt
+	batch.ProgressPercent = 100
 
 	if failedOps > 0 && completedOps == 0 {
 		tx.Rollback()
 		batch.Status = "failed"
+		batch.OperationResults = string(resultsJSON)
 		h.db.Save(&batch)
-		apperrors.AbortWithError(c, apperrors.NewBadRequestError("All batch operations failed: "+lastError))
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":             "All batch operations failed: " + lastError,
+			"batch_id":          batch.ID,
+			"status":            batch.Status,
+			"progress_percent":  batch.ProgressPercent,
+			"failed_operations": results,
+			"total_operations":  batch.TotalOperations,
+		})
 		return
 	}
 
@@ -770,13 +861,24 @@ func (h *AssetHandler) ExecuteBatch(c *gin.Context) {
 	h.db.Save(&batch)
 
 	c.JSON(http.StatusCreated, gin.H{
-		"message":          "Batch processed",
-		"batch_id":         batch.ID,
-		"status":           batch.Status,
-		"total_operations": batch.TotalOperations,
-		"completed":        completedOps,
-		"failed":           failedOps,
-		"tx_hash":          batch.TxHash,
+		"message":           "Batch processed",
+		"batch_id":          batch.ID,
+		"status":            batch.Status,
+		"total_operations":  batch.TotalOperations,
+		"completed":         completedOps,
+		"failed":            failedOps,
+		"tx_hash":           batch.TxHash,
+		"progress_percent":  batch.ProgressPercent,
+		"operation_results": results,
+		"failed_operations": func() []models.BatchOperationResult {
+			failed := make([]models.BatchOperationResult, 0, failedOps)
+			for _, result := range results {
+				if !result.Success {
+					failed = append(failed, result)
+				}
+			}
+			return failed
+		}(),
 	})
 }
 
@@ -857,7 +959,27 @@ func (h *AssetHandler) GetBatchStatus(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, batch)
+	var operationResults []models.BatchOperationResult
+	if batch.OperationResults != "" {
+		if err := json.Unmarshal([]byte(batch.OperationResults), &operationResults); err != nil {
+			operationResults = nil
+		}
+	}
+	failedOperations := make([]models.BatchOperationResult, 0)
+	for _, result := range operationResults {
+		if !result.Success {
+			failedOperations = append(failedOperations, result)
+		}
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"batch":             batch,
+		"progress_percent":  batch.ProgressPercent,
+		"completed":         batch.CompletedCount,
+		"failed":            batch.FailedCount,
+		"total_operations":  batch.TotalOperations,
+		"operation_results": operationResults,
+		"failed_operations": failedOperations,
+	})
 }
 
 // ListBatchTransactions returns batch transactions for the authenticated user
@@ -878,10 +1000,7 @@ func (h *AssetHandler) ListBatchTransactions(c *gin.Context) {
 	if page == 0 {
 		page = 1
 	}
-	limit := query.Limit
-	if limit == 0 {
-		limit = 10
-	}
+	limit := clampPageLimit(query.Limit)
 
 	var batches []models.BatchTransaction
 	var total int64
